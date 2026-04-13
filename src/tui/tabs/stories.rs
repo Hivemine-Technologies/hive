@@ -6,6 +6,8 @@ use ratatui::{
     Frame,
 };
 
+use std::collections::HashMap;
+
 use crate::domain::{Issue, IssueDetail};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,6 +29,12 @@ impl SortColumn {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StoriesFocus {
+    Table,
+    Detail,
+}
+
 pub struct StoriesState {
     pub issues: Vec<Issue>,
     pub selected: usize,
@@ -35,8 +43,10 @@ pub struct StoriesState {
     pub sort_ascending: bool,
     pub loading: bool,
     pub filter_active: bool,
-    pub selected_detail: Option<IssueDetail>,
+    pub detail_cache: HashMap<String, IssueDetail>,
     pub detail_loading: bool,
+    pub focus: StoriesFocus,
+    pub detail_scroll: usize,
 }
 
 impl StoriesState {
@@ -49,8 +59,10 @@ impl StoriesState {
             sort_ascending: true,
             loading: false,
             filter_active: false,
-            selected_detail: None,
+            detail_cache: HashMap::new(),
             detail_loading: false,
+            focus: StoriesFocus::Table,
+            detail_scroll: 0,
         }
     }
 
@@ -95,10 +107,12 @@ impl StoriesState {
     pub fn move_down(&mut self) {
         let max = self.filtered_issues().len().saturating_sub(1);
         self.selected = (self.selected + 1).min(max);
+        self.detail_scroll = 0;
     }
 
     pub fn move_up(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+        self.detail_scroll = 0;
     }
 
     pub fn toggle_sort(&mut self) {
@@ -134,24 +148,43 @@ impl StoriesState {
         self.selected = 0;
     }
 
-    /// Returns the selected issue ID if the detail cache is stale (different issue or no cache).
+    /// Returns the selected issue ID if it's not in the detail cache.
     pub fn needs_detail_fetch(&self) -> Option<String> {
         let issue = self.selected_issue()?;
-        if let Some(ref detail) = self.selected_detail {
-            if detail.id == issue.id {
-                return None; // already cached
-            }
+        if self.detail_cache.contains_key(&issue.id) {
+            return None; // already cached
         }
         Some(issue.id.clone())
     }
 
+    /// Get the cached detail for the currently selected issue, if available.
+    pub fn selected_detail(&self) -> Option<&IssueDetail> {
+        let issue = self.selected_issue()?;
+        self.detail_cache.get(&issue.id)
+    }
+
     pub fn set_detail(&mut self, detail: IssueDetail) {
-        self.selected_detail = Some(detail);
+        self.detail_cache.insert(detail.id.clone(), detail);
         self.detail_loading = false;
     }
 
-    pub fn invalidate_detail(&mut self) {
-        self.selected_detail = None;
+    pub fn invalidate_cache(&mut self) {
+        self.detail_cache.clear();
+    }
+
+    pub fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            StoriesFocus::Table => StoriesFocus::Detail,
+            StoriesFocus::Detail => StoriesFocus::Table,
+        };
+    }
+
+    pub fn scroll_detail_down(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_add(1);
+    }
+
+    pub fn scroll_detail_up(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_sub(1);
     }
 }
 
@@ -338,19 +371,17 @@ pub fn render(frame: &mut Frame, area: Rect, state: &StoriesState) {
         ];
 
         // Show cached description if available
-        if let Some(ref detail) = state.selected_detail {
-            if detail.id == issue.id {
+        if let Some(detail) = state.selected_detail() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("Description", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+            for desc_line in detail.description.lines() {
+                lines.push(Line::from(desc_line.to_string()));
+            }
+            if let Some(ref ac) = detail.acceptance_criteria {
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled("Description", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
-                for desc_line in detail.description.lines() {
-                    lines.push(Line::from(desc_line.to_string()));
-                }
-                if let Some(ref ac) = detail.acceptance_criteria {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled("Acceptance Criteria", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
-                    for ac_line in ac.lines() {
-                        lines.push(Line::from(ac_line.to_string()));
-                    }
+                lines.push(Line::from(Span::styled("Acceptance Criteria", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+                for ac_line in ac.lines() {
+                    lines.push(Line::from(ac_line.to_string()));
                 }
             }
         } else if state.detail_loading {
@@ -366,13 +397,19 @@ pub fn render(frame: &mut Frame, area: Rect, state: &StoriesState) {
         ))]
     };
 
+    let detail_border_color = if state.focus == StoriesFocus::Detail {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
     let detail = Paragraph::new(detail_content)
         .wrap(ratatui::widgets::Wrap { trim: false })
+        .scroll((state.detail_scroll as u16, 0))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Details ")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .title(" Details (Tab to focus, j/k to scroll) ")
+                .border_style(Style::default().fg(detail_border_color)),
         );
     frame.render_widget(detail, detail_area);
 

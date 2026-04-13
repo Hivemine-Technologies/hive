@@ -10,7 +10,7 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
-use crate::domain::{AgentEvent, IssueFilters, OrchestratorEvent, StoryRun, TuiCommand};
+use crate::domain::{AgentEvent, IssueDetail, IssueFilters, OrchestratorEvent, StoryRun, TuiCommand};
 use crate::trackers::IssueTracker;
 
 use self::tabs::agents::{AgentFocus, AgentsState};
@@ -32,6 +32,10 @@ pub struct Tui {
     config_dir: PathBuf,
     project_name: String,
 
+    // Background detail fetch
+    detail_rx: mpsc::Receiver<IssueDetail>,
+    detail_tx: mpsc::Sender<IssueDetail>,
+
     // Per-tab state
     agents_state: AgentsState,
     stories_state: StoriesState,
@@ -49,6 +53,7 @@ impl Tui {
         config_dir: PathBuf,
         project_name: String,
     ) -> Self {
+        let (detail_tx, detail_rx) = mpsc::channel(16);
         Self {
             active_tab: Tab::Agents,
             runs: Vec::new(),
@@ -61,6 +66,8 @@ impl Tui {
             repo_path,
             config_dir,
             project_name,
+            detail_rx,
+            detail_tx,
             agents_state: AgentsState::new(),
             stories_state: StoriesState::new(),
             worktrees_state: WorktreesState::new(),
@@ -83,6 +90,9 @@ impl Tui {
                             self.handle_key(key.code, key.modifiers).await;
                         }
                     }
+                }
+                Some(detail) = self.detail_rx.recv() => {
+                    self.stories_state.set_detail(detail);
                 }
                 Some(event) = self.event_rx.recv() => {
                     self.handle_orchestrator_event(event);
@@ -353,28 +363,38 @@ impl Tui {
             return;
         }
 
-        match code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.stories_state.move_down();
-                self.fetch_story_detail_if_needed().await;
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.stories_state.move_up();
-                self.fetch_story_detail_if_needed().await;
-            }
-            KeyCode::Char('/') => self.stories_state.activate_filter(),
-            KeyCode::Char('s') => self.stories_state.toggle_sort(),
-            KeyCode::Char('S') => self.stories_state.toggle_sort_direction(),
-            KeyCode::Char('r') => self.fetch_stories().await,
-            KeyCode::Enter => {
-                if let Some(issue) = self.stories_state.selected_issue().cloned() {
-                    let _ = self
-                        .command_tx
-                        .send(TuiCommand::StartStory { issue })
-                        .await;
+        use self::tabs::stories::StoriesFocus;
+        match self.stories_state.focus {
+            StoriesFocus::Table => match code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.stories_state.move_down();
+                    self.fetch_story_detail_if_needed();
                 }
-            }
-            _ => {}
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.stories_state.move_up();
+                    self.fetch_story_detail_if_needed();
+                }
+                KeyCode::Tab => self.stories_state.toggle_focus(),
+                KeyCode::Char('/') => self.stories_state.activate_filter(),
+                KeyCode::Char('s') => self.stories_state.toggle_sort(),
+                KeyCode::Char('S') => self.stories_state.toggle_sort_direction(),
+                KeyCode::Char('r') => self.fetch_stories().await,
+                KeyCode::Enter => {
+                    if let Some(issue) = self.stories_state.selected_issue().cloned() {
+                        let _ = self
+                            .command_tx
+                            .send(TuiCommand::StartStory { issue })
+                            .await;
+                    }
+                }
+                _ => {}
+            },
+            StoriesFocus::Detail => match code {
+                KeyCode::Char('j') | KeyCode::Down => self.stories_state.scroll_detail_down(),
+                KeyCode::Char('k') | KeyCode::Up => self.stories_state.scroll_detail_up(),
+                KeyCode::Tab => self.stories_state.toggle_focus(),
+                _ => {}
+            },
         }
     }
 
@@ -472,8 +492,8 @@ impl Tui {
             Ok(issues) => {
                 self.stories_state.issues = issues;
                 self.stories_state.loading = false;
-                self.stories_state.invalidate_detail();
-                self.fetch_story_detail_if_needed().await;
+                self.stories_state.invalidate_cache();
+                self.fetch_story_detail_if_needed();
             }
             Err(e) => {
                 tracing::warn!("Failed to fetch stories: {e}");
@@ -482,18 +502,21 @@ impl Tui {
         }
     }
 
-    async fn fetch_story_detail_if_needed(&mut self) {
+    fn fetch_story_detail_if_needed(&mut self) {
         if let Some(issue_id) = self.stories_state.needs_detail_fetch() {
             self.stories_state.detail_loading = true;
-            match self.tracker.get_issue(&issue_id).await {
-                Ok(detail) => {
-                    self.stories_state.set_detail(detail);
+            let tracker = self.tracker.clone();
+            let tx = self.detail_tx.clone();
+            tokio::spawn(async move {
+                match tracker.get_issue(&issue_id).await {
+                    Ok(detail) => {
+                        let _ = tx.send(detail).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch story detail for {issue_id}: {e}");
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to fetch story detail for {issue_id}: {e}");
-                    self.stories_state.detail_loading = false;
-                }
-            }
+            });
         }
     }
 
