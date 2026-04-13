@@ -1,0 +1,32 @@
+# Hive global configuration example
+# Copy to ~/.config/hive/config.toml
+
+[runners.claude]
+command = "claude"
+protocol = "acp"
+default_model = "opus-4-6"
+permission_mode = "dangerously-skip"
+
+[runners.gemini]
+command = "gemini"
+protocol = "acp"
+default_model = "flash"
+
+[runners.codex]
+command = "codex"
+protocol = "acp"
+default_model = "codex-mini"
+
+[trackers.linear]
+api_key = "env:LINEAR_API_KEY"
+
+[trackers.jira]
+base_url = "https://mycompany.atlassian.net"
+api_token = "env:JIRA_API_TOKEN"
+email = "env:JIRA_EMAIL"
+
+[notifications.discord]
+webhook_url = "env:HIVE_DISCORD_WEBHOOK"
+
+[notifications.slack]
+webhook_url = "env:HIVE_SLACK_WEBHOOK"

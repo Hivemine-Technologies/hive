@@ -1,4 +1,5 @@
 pub mod discord;
+pub mod slack;
 
 use async_trait::async_trait;
 

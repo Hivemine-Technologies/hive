@@ -1,4 +1,6 @@
 pub mod claude;
+pub mod codex;
+pub mod gemini;
 
 use std::path::PathBuf;
 use std::pin::Pin;
