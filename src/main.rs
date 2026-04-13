@@ -1,6 +1,7 @@
 mod config;
 mod domain;
 mod error;
+mod notifiers;
 mod runners;
 mod state;
 mod trackers;
