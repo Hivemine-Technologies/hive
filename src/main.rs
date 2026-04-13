@@ -14,7 +14,15 @@ mod tui;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "hive", version, about = "Agent orchestration TUI")]
+#[command(
+    name = "hive",
+    version,
+    about = "Agent orchestration TUI for story-to-PR automation",
+    long_about = "Hive orchestrates autonomous coding agents through a story-to-PR pipeline.\n\n\
+        Run `hive` with no subcommand to launch the TUI dashboard.\n\
+        Run `hive init` to set up a new project.\n\n\
+        Required env vars: GITHUB_TOKEN (or GH_TOKEN), LINEAR_API_KEY (or JIRA_API_TOKEN)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -22,11 +30,11 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Commands {
-    /// Initialize a new project
+    /// Set up a new project (interactive wizard)
     Init,
-    /// Re-run the setup wizard
+    /// Reconfigure the current project (edit existing settings)
     Configure,
-    /// Print status of all active runs
+    /// Print a summary of all active story runs
     Status,
 }
 

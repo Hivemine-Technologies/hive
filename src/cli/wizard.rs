@@ -212,7 +212,63 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
         "   Config: {}",
         project_dir.join("project.toml").display()
     );
-    println!("   Run `hive` in your repo to launch the dashboard.");
+
+    // Check and remind about required env vars
+    println!("\n📋 Before running `hive`, make sure these environment variables are set:\n");
+
+    let mut all_set = true;
+
+    // GitHub token
+    let has_gh_token = std::env::var("GITHUB_TOKEN").is_ok() || std::env::var("GH_TOKEN").is_ok();
+    if has_gh_token {
+        println!("   ✓ GITHUB_TOKEN is set");
+    } else {
+        println!("   ✗ GITHUB_TOKEN — required for PR creation and CI polling");
+        println!("     export GITHUB_TOKEN=ghp_...");
+        all_set = false;
+    }
+
+    // Tracker API key
+    if project_config.tracker == "linear" {
+        if std::env::var("LINEAR_API_KEY").is_ok() {
+            println!("   ✓ LINEAR_API_KEY is set");
+        } else {
+            println!("   ✗ LINEAR_API_KEY — required for issue tracker queries");
+            println!("     export LINEAR_API_KEY=lin_api_...");
+            all_set = false;
+        }
+    } else if project_config.tracker == "jira" {
+        if std::env::var("JIRA_API_TOKEN").is_ok() {
+            println!("   ✓ JIRA_API_TOKEN is set");
+        } else {
+            println!("   ✗ JIRA_API_TOKEN — required for Jira integration");
+            all_set = false;
+        }
+    }
+
+    // Notifier webhook
+    if let Some(ref n) = project_config.notifier {
+        let var_name = match n.as_str() {
+            "discord" => Some("HIVE_DISCORD_WEBHOOK"),
+            "slack" => Some("HIVE_SLACK_WEBHOOK"),
+            _ => None,
+        };
+        if let Some(var) = var_name {
+            if std::env::var(var).is_ok() {
+                println!("   ✓ {var} is set");
+            } else {
+                println!("   ✗ {var} — required for {n} notifications (optional)");
+                all_set = false;
+            }
+        }
+    }
+
+    if all_set {
+        println!("\n   All set! Run `hive` in your repo to launch the dashboard.");
+    } else {
+        println!("\n   Set the missing variables above, then run `hive` to launch.");
+    }
+
     Ok(())
 }
 

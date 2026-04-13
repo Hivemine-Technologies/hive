@@ -98,19 +98,38 @@ pub async fn run(repo_path: &str) -> Result<()> {
     let tui_tracker_config = project.tracker_config.clone();
     let tui_project_name = project.name.clone();
 
-    // Resolve GitHub client (optional -- full wiring in a later task)
+    // Resolve GitHub client
     let github_client: Option<Arc<crate::git::github::GitHubClient>> = {
         let token = std::env::var("GITHUB_TOKEN")
             .or_else(|_| std::env::var("GH_TOKEN"))
             .ok();
-        token.map(|t| {
-            Arc::new(crate::git::github::GitHubClient::new(
+        match token {
+            Some(t) => Some(Arc::new(crate::git::github::GitHubClient::new(
                 project.github.owner.clone(),
                 project.github.repo.clone(),
                 t,
-            ))
-        })
+            ))),
+            None => {
+                eprintln!("⚠ GITHUB_TOKEN (or GH_TOKEN) is not set.");
+                eprintln!("  PR creation, CI polling, and bot review phases will fail.");
+                eprintln!("  Set it with: export GITHUB_TOKEN=ghp_...\n");
+                None
+            }
+        }
     };
+
+    // Validate tracker credentials are resolvable
+    if project.tracker == "linear" {
+        if let Some(ref key) = tracker_conn.api_key {
+            if key.starts_with("env:") {
+                let var_name = &key[4..];
+                if std::env::var(var_name).is_err() {
+                    eprintln!("⚠ {var_name} is not set. Issue tracker queries will fail.");
+                    eprintln!("  Set it with: export {var_name}=lin_api_...\n");
+                }
+            }
+        }
+    }
 
     // Start orchestrator in background
     let mut orchestrator = Orchestrator::new(
