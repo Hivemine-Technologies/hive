@@ -1,3 +1,5 @@
+mod config;
+mod domain;
 mod error;
 
 fn main() {
