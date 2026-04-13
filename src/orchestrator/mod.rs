@@ -502,6 +502,20 @@ async fn story_phase_loop(
                 .await;
             }
             PhaseOutcome::NeedsAttention { reason } => {
+                // Send a specific CiFailedMaxRetries notification for CI/bot-review phases
+                if matches!(
+                    run.phase,
+                    Phase::CiWatch { .. } | Phase::BotReviews { .. }
+                ) {
+                    send_notification_if_configured(
+                        &notifier,
+                        NotifyEvent::CiFailedMaxRetries {
+                            issue_id: issue_id.clone(),
+                        },
+                    )
+                    .await;
+                }
+
                 run.phase = Phase::NeedsAttention {
                     reason: reason.clone(),
                 };

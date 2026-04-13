@@ -56,7 +56,10 @@ async fn main() {
             }
         }
         Some(Commands::Configure) => {
-            println!("hive configure — not yet implemented");
+            if let Err(e) = cli::configure::run_configure() {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
         }
         Some(Commands::Status) => {
             let cwd = std::env::current_dir()
