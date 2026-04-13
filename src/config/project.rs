@@ -34,7 +34,7 @@ pub struct GitHubConfig {
     pub repo: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TrackerConfig {
     pub team: String,
     pub ready_filter: String,
@@ -43,7 +43,7 @@ pub struct TrackerConfig {
     pub fields: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct StatusMappings {
     pub start: String,
     pub review: String,
