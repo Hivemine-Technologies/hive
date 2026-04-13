@@ -41,8 +41,9 @@ impl ClaudeRunner {
     fn build_args(&self, config: &SessionConfig) -> Vec<String> {
         // -p (--print) is a boolean flag, NOT -p <prompt>.
         // The prompt goes as the final positional argument.
+        // Note: we do NOT use --bare because it disables OAuth/keychain auth,
+        // requiring ANTHROPIC_API_KEY. Most users auth via OAuth.
         let mut args = vec![
-            "--bare".to_string(),
             "-p".to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
@@ -496,7 +497,7 @@ mod tests {
         let args = runner.build_args(&config);
         assert!(args.contains(&"opus-4-6".to_string()));
         assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"--bare".to_string()));
+        assert!(args.contains(&"-p".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
     }
 
