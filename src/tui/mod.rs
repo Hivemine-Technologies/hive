@@ -185,8 +185,9 @@ impl Tui {
                 Line::from(Span::styled("Worktrees Tab", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
                 Line::from(""),
                 Line::from(vec![Span::styled("j/k ", Style::default().fg(Color::Yellow)), Span::raw("Navigate worktrees")]),
-                Line::from(vec![Span::styled("r   ", Style::default().fg(Color::Yellow)), Span::raw("Rebase selected worktree")]),
-                Line::from(vec![Span::styled("d   ", Style::default().fg(Color::Yellow)), Span::raw("Delete selected worktree")]),
+                Line::from(vec![Span::styled("r   ", Style::default().fg(Color::Yellow)), Span::raw("Refresh worktree list")]),
+                Line::from(vec![Span::styled("R   ", Style::default().fg(Color::Yellow)), Span::raw("Rebase selected worktree")]),
+                Line::from(vec![Span::styled("d   ", Style::default().fg(Color::Yellow)), Span::raw("Delete selected worktree (y to confirm)")]),
                 Line::from(vec![Span::styled("o   ", Style::default().fg(Color::Yellow)), Span::raw("Copy worktree path")]),
             ],
             Tab::Config => vec![
@@ -381,10 +382,22 @@ impl Tui {
                 KeyCode::Char('r') => self.fetch_stories().await,
                 KeyCode::Enter => {
                     if let Some(issue) = self.stories_state.selected_issue().cloned() {
+                        let issue_id = issue.id.clone();
                         let _ = self
                             .command_tx
                             .send(TuiCommand::StartStory { issue })
                             .await;
+                        // Remove the started story from the list
+                        self.stories_state
+                            .issues
+                            .retain(|i| i.id != issue_id);
+                        if self.stories_state.selected > 0
+                            && self.stories_state.selected
+                                >= self.stories_state.issues.len()
+                        {
+                            self.stories_state.selected =
+                                self.stories_state.issues.len().saturating_sub(1);
+                        }
                     }
                 }
                 _ => {}
@@ -402,6 +415,24 @@ impl Tui {
         if self.worktrees_state.confirm_delete {
             match code {
                 KeyCode::Char('y') => {
+                    // Actually delete the worktree
+                    if let Some(wt) = self.worktrees_state.selected_worktree() {
+                        let wt_path = wt.path.clone();
+                        // Find the issue_id from the worktree path (last component)
+                        let issue_id = wt_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let worktree_dir = wt_path.parent().unwrap_or(&self.repo_path);
+                        if let Err(e) = crate::git::worktree::remove_worktree(
+                            &self.repo_path,
+                            &issue_id,
+                            worktree_dir,
+                        ) {
+                            tracing::warn!("Failed to delete worktree: {e}");
+                        }
+                    }
                     self.worktrees_state.confirm_delete = false;
                     self.worktrees_state.refresh(&self.repo_path);
                 }
@@ -415,7 +446,8 @@ impl Tui {
         match code {
             KeyCode::Char('j') | KeyCode::Down => self.worktrees_state.move_down(),
             KeyCode::Char('k') | KeyCode::Up => self.worktrees_state.move_up(),
-            KeyCode::Char('r') => {
+            KeyCode::Char('R') => {
+                // Rebase selected worktree
                 if let Some(wt) = self.worktrees_state.selected_worktree() {
                     if let Some(ref branch) = wt.branch {
                         for run in &self.runs {
@@ -431,6 +463,10 @@ impl Tui {
                         }
                     }
                 }
+            }
+            KeyCode::Char('r') => {
+                // Refresh worktree list
+                self.worktrees_state.refresh(&self.repo_path);
             }
             KeyCode::Char('d') => {
                 self.worktrees_state.confirm_delete = true;
