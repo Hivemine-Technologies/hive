@@ -39,10 +39,11 @@ impl ClaudeRunner {
     }
 
     fn build_args(&self, config: &SessionConfig) -> Vec<String> {
+        // -p (--print) is a boolean flag, NOT -p <prompt>.
+        // The prompt goes as the final positional argument.
         let mut args = vec![
             "--bare".to_string(),
             "-p".to_string(),
-            config.system_prompt.clone(),
             "--output-format".to_string(),
             "stream-json".to_string(),
             "--verbose".to_string(),
@@ -59,6 +60,9 @@ impl ClaudeRunner {
             args.push("--permission-mode".to_string());
             args.push(pm.to_string());
         }
+
+        // Prompt must be the last positional argument
+        args.push(config.system_prompt.clone());
 
         args
     }
@@ -490,5 +494,25 @@ mod tests {
         let args = runner.build_args(&config);
         assert!(args.contains(&"sonnet-4-6".to_string()));
         assert!(!args.contains(&"opus-4-6".to_string()));
+    }
+
+    #[test]
+    fn test_build_args_prompt_is_last() {
+        let runner = ClaudeRunner::new(
+            "claude".to_string(),
+            "opus-4-6".to_string(),
+            None,
+        );
+        let config = SessionConfig {
+            working_dir: std::path::PathBuf::from("/tmp"),
+            system_prompt: "my test prompt".to_string(),
+            model: None,
+            permission_mode: None,
+        };
+        let args = runner.build_args(&config);
+        assert_eq!(args.last().unwrap(), "my test prompt");
+        // -p should be a standalone flag, not followed by the prompt
+        let p_idx = args.iter().position(|a| a == "-p").unwrap();
+        assert_ne!(args[p_idx + 1], "my test prompt");
     }
 }
