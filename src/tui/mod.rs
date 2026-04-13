@@ -23,6 +23,7 @@ pub struct Tui {
     active_tab: Tab,
     runs: Vec<StoryRun>,
     should_quit: bool,
+    show_help: bool,
     event_rx: mpsc::Receiver<OrchestratorEvent>,
     command_tx: mpsc::Sender<TuiCommand>,
     tracker: Arc<dyn IssueTracker>,
@@ -52,6 +53,7 @@ impl Tui {
             active_tab: Tab::Agents,
             runs: Vec::new(),
             should_quit: false,
+            show_help: false,
             event_rx,
             command_tx,
             tracker,
@@ -119,11 +121,107 @@ impl Tui {
         }
 
         widgets::status_bar::render_status_bar(frame, status_area, &self.runs);
+
+        // Help overlay
+        if self.show_help {
+            self.render_help_overlay(frame);
+        }
+    }
+
+    fn render_help_overlay(&self, frame: &mut ratatui::Frame) {
+        use ratatui::layout::{Constraint, Flex, Layout, Rect};
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+        let area = frame.area();
+        // Center a box roughly 60x24
+        let [_, center_h, _] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(26),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+        let [_, popup, _] = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(60),
+            Constraint::Fill(1),
+        ])
+        .areas(center_h);
+
+        let help_text = match self.active_tab {
+            Tab::Agents => vec![
+                Line::from(Span::styled("Agents Tab", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(vec![Span::styled("j/k ", Style::default().fg(Color::Yellow)), Span::raw("Navigate agent list")]),
+                Line::from(vec![Span::styled("Tab ", Style::default().fg(Color::Yellow)), Span::raw("Toggle sidebar / log panel focus")]),
+                Line::from(vec![Span::styled("c   ", Style::default().fg(Color::Yellow)), Span::raw("Cancel selected agent")]),
+                Line::from(vec![Span::styled("r   ", Style::default().fg(Color::Yellow)), Span::raw("Rebase selected worktree")]),
+                Line::from(vec![Span::styled("R   ", Style::default().fg(Color::Yellow)), Span::raw("Retry failed/attention agent")]),
+                Line::from(vec![Span::styled("o   ", Style::default().fg(Color::Yellow)), Span::raw("Copy worktree path")]),
+                Line::from(vec![Span::styled("g/G ", Style::default().fg(Color::Yellow)), Span::raw("Scroll log top/bottom")]),
+            ],
+            Tab::Stories => vec![
+                Line::from(Span::styled("Stories Tab", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(vec![Span::styled("j/k   ", Style::default().fg(Color::Yellow)), Span::raw("Navigate stories")]),
+                Line::from(vec![Span::styled("Enter ", Style::default().fg(Color::Yellow)), Span::raw("Start selected story")]),
+                Line::from(vec![Span::styled("r     ", Style::default().fg(Color::Yellow)), Span::raw("Refresh story list")]),
+                Line::from(vec![Span::styled("/     ", Style::default().fg(Color::Yellow)), Span::raw("Filter stories")]),
+                Line::from(vec![Span::styled("s     ", Style::default().fg(Color::Yellow)), Span::raw("Cycle sort column")]),
+                Line::from(vec![Span::styled("S     ", Style::default().fg(Color::Yellow)), Span::raw("Toggle sort direction")]),
+            ],
+            Tab::Worktrees => vec![
+                Line::from(Span::styled("Worktrees Tab", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(vec![Span::styled("j/k ", Style::default().fg(Color::Yellow)), Span::raw("Navigate worktrees")]),
+                Line::from(vec![Span::styled("r   ", Style::default().fg(Color::Yellow)), Span::raw("Rebase selected worktree")]),
+                Line::from(vec![Span::styled("d   ", Style::default().fg(Color::Yellow)), Span::raw("Delete selected worktree")]),
+                Line::from(vec![Span::styled("o   ", Style::default().fg(Color::Yellow)), Span::raw("Copy worktree path")]),
+            ],
+            Tab::Config => vec![
+                Line::from(Span::styled("Config Tab", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(vec![Span::styled("j/k ", Style::default().fg(Color::Yellow)), Span::raw("Scroll config")]),
+                Line::from(vec![Span::styled("e   ", Style::default().fg(Color::Yellow)), Span::raw("Open config in $EDITOR")]),
+                Line::from(vec![Span::styled("r   ", Style::default().fg(Color::Yellow)), Span::raw("Reload config from disk")]),
+            ],
+        };
+
+        let mut lines = help_text;
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Global", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled("1-4 ", Style::default().fg(Color::Yellow)), Span::raw("Switch tabs")]));
+        lines.push(Line::from(vec![Span::styled("q   ", Style::default().fg(Color::Yellow)), Span::raw("Quit (agents keep running)")]));
+        lines.push(Line::from(vec![Span::styled("?   ", Style::default().fg(Color::Yellow)), Span::raw("Toggle this help")]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Press any key to close", Style::default().fg(Color::DarkGray))));
+
+        let paragraph = Paragraph::new(lines).block(
+            Block::default()
+                .title(" Help ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
+
+        frame.render_widget(Clear, popup);
+        frame.render_widget(paragraph, popup);
     }
 
     async fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Dismiss help overlay on any key
+        if self.show_help {
+            self.show_help = false;
+            return;
+        }
+
         // Global keys
         match code {
+            KeyCode::Char('?') if !self.stories_state.filter_active => {
+                self.show_help = true;
+                return;
+            }
             KeyCode::Char('q') if !self.stories_state.filter_active => {
                 let _ = self.command_tx.send(TuiCommand::Quit).await;
                 self.should_quit = true;

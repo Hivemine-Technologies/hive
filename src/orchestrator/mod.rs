@@ -102,10 +102,8 @@ impl Orchestrator {
                 Some(cmd) = self.command_rx.recv() => {
                     match cmd {
                         TuiCommand::Quit => {
-                            // Cancel all running stories
-                            for token in self.cancel_tokens.values() {
-                                token.cancel();
-                            }
+                            // Detach cleanly — leave agents running.
+                            // On relaunch, crash recovery will reattach or resume.
                             break;
                         }
                         TuiCommand::StartStory { issue } => {

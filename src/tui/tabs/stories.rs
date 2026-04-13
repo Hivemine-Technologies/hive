@@ -272,8 +272,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &StoriesState) {
             Constraint::Length(12),
             Constraint::Fill(1),
             Constraint::Length(10),
-            Constraint::Length(15),
             Constraint::Length(20),
+            Constraint::Length(30),
         ],
     )
     .header(headers)
