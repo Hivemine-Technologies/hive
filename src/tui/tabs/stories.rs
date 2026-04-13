@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::domain::Issue;
+use crate::domain::{Issue, IssueDetail};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SortColumn {
@@ -35,6 +35,8 @@ pub struct StoriesState {
     pub sort_ascending: bool,
     pub loading: bool,
     pub filter_active: bool,
+    pub selected_detail: Option<IssueDetail>,
+    pub detail_loading: bool,
 }
 
 impl StoriesState {
@@ -47,6 +49,8 @@ impl StoriesState {
             sort_ascending: true,
             loading: false,
             filter_active: false,
+            selected_detail: None,
+            detail_loading: false,
         }
     }
 
@@ -129,6 +133,26 @@ impl StoriesState {
         self.filter_text.pop();
         self.selected = 0;
     }
+
+    /// Returns the selected issue ID if the detail cache is stale (different issue or no cache).
+    pub fn needs_detail_fetch(&self) -> Option<String> {
+        let issue = self.selected_issue()?;
+        if let Some(ref detail) = self.selected_detail {
+            if detail.id == issue.id {
+                return None; // already cached
+            }
+        }
+        Some(issue.id.clone())
+    }
+
+    pub fn set_detail(&mut self, detail: IssueDetail) {
+        self.selected_detail = Some(detail);
+        self.detail_loading = false;
+    }
+
+    pub fn invalidate_detail(&mut self) {
+        self.selected_detail = None;
+    }
 }
 
 fn priority_rank(p: Option<&str>) -> u8 {
@@ -152,7 +176,8 @@ fn priority_color(p: Option<&str>) -> Color {
 }
 
 pub fn render(frame: &mut Frame, area: Rect, state: &StoriesState) {
-    let [table_area, filter_area] = Layout::vertical([
+    let [table_area, detail_area, filter_area] = Layout::vertical([
+        Constraint::Percentage(50),
         Constraint::Fill(1),
         Constraint::Length(if state.filter_active { 1 } else { 0 }),
     ])
@@ -282,6 +307,74 @@ pub fn render(frame: &mut Frame, area: Rect, state: &StoriesState) {
     );
 
     frame.render_widget(table, table_area);
+
+    // Detail pane for selected story
+    let detail_content = if let Some(issue) = filtered.get(state.selected) {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(&issue.id, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(" — "),
+                Span::styled(&issue.title, Style::default().add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Priority: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    issue.priority.as_deref().unwrap_or("None"),
+                    Style::default().fg(priority_color(issue.priority.as_deref())),
+                ),
+                Span::raw("    "),
+                Span::styled("Project: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(issue.project.as_deref().unwrap_or("-")),
+            ]),
+            Line::from(vec![
+                Span::styled("Labels: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(if issue.labels.is_empty() { "none".to_string() } else { issue.labels.join(", ") }),
+            ]),
+            Line::from(vec![
+                Span::styled("URL: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(&issue.url, Style::default().fg(Color::Blue)),
+            ]),
+        ];
+
+        // Show cached description if available
+        if let Some(ref detail) = state.selected_detail {
+            if detail.id == issue.id {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("Description", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+                for desc_line in detail.description.lines() {
+                    lines.push(Line::from(desc_line.to_string()));
+                }
+                if let Some(ref ac) = detail.acceptance_criteria {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled("Acceptance Criteria", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+                    for ac_line in ac.lines() {
+                        lines.push(Line::from(ac_line.to_string()));
+                    }
+                }
+            }
+        } else if state.detail_loading {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("Loading details...", Style::default().fg(Color::Yellow))));
+        }
+
+        lines
+    } else {
+        vec![Line::from(Span::styled(
+            "Select a story to view details",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    };
+
+    let detail = Paragraph::new(detail_content)
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Details ")
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+    frame.render_widget(detail, detail_area);
 
     // Filter bar
     if state.filter_active {

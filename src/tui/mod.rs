@@ -354,8 +354,14 @@ impl Tui {
         }
 
         match code {
-            KeyCode::Char('j') | KeyCode::Down => self.stories_state.move_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.stories_state.move_up(),
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.stories_state.move_down();
+                self.fetch_story_detail_if_needed().await;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.stories_state.move_up();
+                self.fetch_story_detail_if_needed().await;
+            }
             KeyCode::Char('/') => self.stories_state.activate_filter(),
             KeyCode::Char('s') => self.stories_state.toggle_sort(),
             KeyCode::Char('S') => self.stories_state.toggle_sort_direction(),
@@ -466,10 +472,27 @@ impl Tui {
             Ok(issues) => {
                 self.stories_state.issues = issues;
                 self.stories_state.loading = false;
+                self.stories_state.invalidate_detail();
+                self.fetch_story_detail_if_needed().await;
             }
             Err(e) => {
                 tracing::warn!("Failed to fetch stories: {e}");
                 self.stories_state.loading = false;
+            }
+        }
+    }
+
+    async fn fetch_story_detail_if_needed(&mut self) {
+        if let Some(issue_id) = self.stories_state.needs_detail_fetch() {
+            self.stories_state.detail_loading = true;
+            match self.tracker.get_issue(&issue_id).await {
+                Ok(detail) => {
+                    self.stories_state.set_detail(detail);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch story detail for {issue_id}: {e}");
+                    self.stories_state.detail_loading = false;
+                }
             }
         }
     }
