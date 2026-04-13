@@ -243,8 +243,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &StoriesState) {
             };
             let priority_str = issue.priority.as_deref().unwrap_or("None");
             let labels_str = issue.labels.join(", ");
-            let title = if issue.title.len() > 50 {
-                format!("{}...", &issue.title[..47])
+            let title = if issue.title.len() > 60 {
+                format!("{}...", &issue.title[..57])
             } else {
                 issue.title.clone()
             };
@@ -269,11 +269,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &StoriesState) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(12),
-            Constraint::Fill(1),
-            Constraint::Length(10),
-            Constraint::Length(20),
-            Constraint::Length(30),
+            Constraint::Percentage(8),   // ID
+            Constraint::Percentage(35),  // Title
+            Constraint::Percentage(8),   // Priority
+            Constraint::Percentage(22),  // Project
+            Constraint::Percentage(27),  // Labels
         ],
     )
     .header(headers)
