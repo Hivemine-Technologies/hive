@@ -92,9 +92,31 @@ pub async fn run(repo_path: &str) -> Result<()> {
         .join(&project.name)
         .join("runs");
 
+    // Resolve GitHub client (optional -- full wiring in a later task)
+    let github_client: Option<Arc<crate::git::github::GitHubClient>> = {
+        let token = std::env::var("GITHUB_TOKEN")
+            .or_else(|_| std::env::var("GH_TOKEN"))
+            .ok();
+        token.map(|t| {
+            Arc::new(crate::git::github::GitHubClient::new(
+                project.github.owner.clone(),
+                project.github.repo.clone(),
+                t,
+            ))
+        })
+    };
+
     // Start orchestrator in background
-    let mut orchestrator =
-        Orchestrator::new(project, runs_dir, runner, tracker, notifier, event_tx, command_rx)?;
+    let mut orchestrator = Orchestrator::new(
+        project,
+        runs_dir,
+        runner,
+        tracker,
+        github_client,
+        notifier,
+        event_tx,
+        command_rx,
+    )?;
     tokio::spawn(async move {
         if let Err(e) = orchestrator.run().await {
             tracing::error!("orchestrator error: {e}");
