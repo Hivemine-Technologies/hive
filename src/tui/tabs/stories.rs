@@ -243,11 +243,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &StoriesState) {
             };
             let priority_str = issue.priority.as_deref().unwrap_or("None");
             let labels_str = issue.labels.join(", ");
-            let title = if issue.title.len() > 60 {
-                format!("{}...", &issue.title[..57])
-            } else {
-                issue.title.clone()
-            };
+            let title = issue.title.clone();
             Row::new(vec![
                 Cell::from(issue.id.clone()),
                 Cell::from(title),
@@ -270,10 +266,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &StoriesState) {
         rows,
         [
             Constraint::Percentage(8),   // ID
-            Constraint::Percentage(35),  // Title
+            Constraint::Percentage(50),  // Title
             Constraint::Percentage(8),   // Priority
-            Constraint::Percentage(22),  // Project
-            Constraint::Percentage(27),  // Labels
+            Constraint::Percentage(20),  // Project
+            Constraint::Percentage(14),  // Labels
         ],
     )
     .header(headers)
