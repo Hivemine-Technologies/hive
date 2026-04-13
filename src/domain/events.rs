@@ -14,6 +14,9 @@ pub enum OrchestratorEvent {
         from: Phase,
         to: Phase,
     },
+    StoriesLoaded {
+        issues: Vec<Issue>,
+    },
     Error {
         issue_id: Option<String>,
         message: String,
