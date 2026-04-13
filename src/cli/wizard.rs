@@ -297,7 +297,7 @@ fn create_global_config(config_dir: &PathBuf) -> Result<()> {
     let config = r#"[runners.claude]
 command = "claude"
 protocol = "acp"
-default_model = "opus-4-6"
+default_model = "opus"
 permission_mode = "bypassPermissions"
 
 [runners.gemini]
