@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub name: String,
     pub repo_path: String,
@@ -22,19 +22,19 @@ fn default_worktree_dir() -> String {
     ".worktrees".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NotificationConfig {
     #[serde(default)]
     pub events: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GitHubConfig {
     pub owner: String,
     pub repo: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackerConfig {
     pub team: String,
     pub ready_filter: String,
@@ -43,14 +43,14 @@ pub struct TrackerConfig {
     pub fields: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusMappings {
     pub start: String,
     pub review: String,
     pub done: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PhaseConfig {
     pub enabled: bool,
     #[serde(default)]

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GlobalConfig {
     #[serde(default)]
     pub runners: HashMap<String, RunnerConfig>,
@@ -12,7 +12,7 @@ pub struct GlobalConfig {
     pub notifications: HashMap<String, NotificationConnectionConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RunnerConfig {
     pub command: String,
     pub protocol: Protocol,
@@ -21,14 +21,14 @@ pub struct RunnerConfig {
     pub permission_mode: Option<String>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Acp,
     Subprocess,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TrackerConnectionConfig {
     #[serde(default)]
     pub api_key: Option<String>,
@@ -40,7 +40,7 @@ pub struct TrackerConnectionConfig {
     pub email: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NotificationConnectionConfig {
     pub webhook_url: String,
 }

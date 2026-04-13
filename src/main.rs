@@ -1,4 +1,5 @@
 mod app;
+mod cli;
 mod config;
 mod domain;
 mod error;
@@ -49,13 +50,23 @@ async fn main() {
             }
         }
         Some(Commands::Init) => {
-            println!("hive init — not yet implemented");
+            if let Err(e) = cli::init::run_init() {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
         }
         Some(Commands::Configure) => {
             println!("hive configure — not yet implemented");
         }
         Some(Commands::Status) => {
-            println!("hive status — not yet implemented");
+            let cwd = std::env::current_dir()
+                .expect("cannot determine current directory")
+                .to_string_lossy()
+                .to_string();
+            if let Err(e) = cli::status::run_status(&cwd) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }
