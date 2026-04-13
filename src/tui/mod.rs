@@ -206,6 +206,14 @@ impl Tui {
                             .await;
                     }
                 }
+                KeyCode::Char('R') => {
+                    if let Some(id) = selected_issue_id {
+                        let _ = self
+                            .command_tx
+                            .send(TuiCommand::RetryStory { issue_id: id })
+                            .await;
+                    }
+                }
                 _ => {}
             },
             AgentFocus::LogPanel => match code {

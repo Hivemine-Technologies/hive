@@ -114,6 +114,9 @@ impl Orchestrator {
                         TuiCommand::CancelStory { issue_id } => {
                             self.cancel_story(&issue_id).await?;
                         }
+                        TuiCommand::RetryStory { issue_id } => {
+                            self.retry_story(&issue_id).await?;
+                        }
                         TuiCommand::RebaseStory { issue_id } => {
                             self.rebase_story(&issue_id).await?;
                         }
@@ -217,6 +220,46 @@ impl Orchestrator {
                 .send(OrchestratorEvent::StoryUpdated(run.clone()))
                 .await;
         }
+        Ok(())
+    }
+
+    async fn retry_story(&mut self, issue_id: &str) -> Result<()> {
+        let run_to_spawn = {
+            let Some(run) = self.runs.get_mut(issue_id) else {
+                return Ok(());
+            };
+
+            // Only retry stories that are in NeedsAttention or Failed state
+            if !matches!(run.status, RunStatus::NeedsAttention | RunStatus::Failed) {
+                tracing::warn!("cannot retry {issue_id}: status is {:?}", run.status);
+                return Ok(());
+            }
+
+            // Reset to the phase it failed on (strip NeedsAttention wrapper)
+            let retry_phase = match &run.phase {
+                Phase::NeedsAttention { .. } => {
+                    run.phase_history
+                        .last()
+                        .map(|pr| pr.phase.clone())
+                        .unwrap_or(Phase::Queued)
+                }
+                other => other.clone(),
+            };
+
+            run.phase = retry_phase;
+            run.status = RunStatus::Running;
+            run.updated_at = Utc::now();
+
+            persistence::save_run(&self.runs_dir, run)?;
+            let _ = self
+                .event_tx
+                .send(OrchestratorEvent::StoryUpdated(run.clone()))
+                .await;
+
+            run.clone()
+        };
+
+        self.spawn_story_task(run_to_spawn);
         Ok(())
     }
 
