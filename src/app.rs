@@ -92,6 +92,12 @@ pub async fn run(repo_path: &str) -> Result<()> {
         .join(&project.name)
         .join("runs");
 
+    // Extract values for TUI before project is consumed by orchestrator
+    let repo_path_buf = PathBuf::from(repo_path);
+    let tui_tracker = tracker.clone();
+    let tui_tracker_config = project.tracker_config.clone();
+    let tui_project_name = project.name.clone();
+
     // Resolve GitHub client (optional -- full wiring in a later task)
     let github_client: Option<Arc<crate::git::github::GitHubClient>> = {
         let token = std::env::var("GITHUB_TOKEN")
@@ -124,7 +130,15 @@ pub async fn run(repo_path: &str) -> Result<()> {
     });
 
     // Run TUI
-    let mut tui = Tui::new(event_rx, command_tx);
+    let mut tui = Tui::new(
+        event_rx,
+        command_tx,
+        tui_tracker,
+        tui_tracker_config,
+        repo_path_buf,
+        config_dir.clone(),
+        tui_project_name,
+    );
     let mut terminal = ratatui::init();
     let result = tui.run(&mut terminal).await;
     ratatui::restore();
