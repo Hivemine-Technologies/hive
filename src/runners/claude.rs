@@ -90,7 +90,29 @@ impl ClaudeRunner {
             .stdout
             .take()
             .expect("stdout must be piped");
+        let stderr = child.stderr.take();
         let (tx, rx) = mpsc::channel::<AgentEvent>(256);
+
+        // Read stderr in background and surface as Error event if process fails
+        let tx_err = tx.clone();
+        tokio::spawn(async move {
+            if let Some(stderr) = stderr {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                let mut stderr_buf = String::new();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if !line.trim().is_empty() {
+                        stderr_buf.push_str(&line);
+                        stderr_buf.push('\n');
+                    }
+                }
+                if !stderr_buf.is_empty() {
+                    let _ = tx_err
+                        .send(AgentEvent::Error(format!("claude stderr: {stderr_buf}")))
+                        .await;
+                }
+            }
+        });
 
         tokio::spawn(async move {
             let reader = BufReader::new(stdout);

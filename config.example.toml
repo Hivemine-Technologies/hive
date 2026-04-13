@@ -5,7 +5,7 @@
 command = "claude"
 protocol = "acp"
 default_model = "opus-4-6"
-permission_mode = "dangerously-skip"
+permission_mode = "bypassPermissions"
 
 [runners.gemini]
 command = "gemini"

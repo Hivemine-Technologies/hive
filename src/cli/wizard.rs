@@ -64,9 +64,14 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
 
     let default_ready = existing
         .as_ref()
-        .map(|c| c.tracker_config.ready_filter.clone())
+        .map(|c| c.tracker_config.ready_filter.join(", "))
         .unwrap_or_else(|| "Todo".to_string());
-    let ready_filter = prompt_with_default("Ready status name", &default_ready)?;
+    let ready_input = prompt_with_default("Ready status name(s), comma-separated", &default_ready)?;
+    let ready_filter: Vec<String> = ready_input
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     let default_start = existing
         .as_ref()
@@ -293,7 +298,7 @@ fn create_global_config(config_dir: &PathBuf) -> Result<()> {
 command = "claude"
 protocol = "acp"
 default_model = "opus-4-6"
-permission_mode = "dangerously-skip"
+permission_mode = "bypassPermissions"
 
 [runners.gemini]
 command = "gemini"

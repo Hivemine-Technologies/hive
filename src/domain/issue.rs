@@ -26,7 +26,7 @@ pub struct IssueFilters {
     pub team: Option<String>,
     pub project: Option<String>,
     pub labels: Vec<String>,
-    pub status: Option<String>,
+    pub statuses: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

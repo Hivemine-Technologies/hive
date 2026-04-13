@@ -37,10 +37,45 @@ pub struct GitHubConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackerConfig {
     pub team: String,
-    pub ready_filter: String,
+    /// One or more statuses that mean "ready for work".
+    /// Accepts a single string ("Todo") or a list (["Todo", "Ready"]).
+    #[serde(deserialize_with = "deserialize_string_or_vec", default)]
+    pub ready_filter: Vec<String>,
     pub statuses: StatusMappings,
     #[serde(default)]
     pub fields: HashMap<String, String>,
+}
+
+/// Deserialize either a single string or a vec of strings.
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrVec;
+
+    impl<'de> de::Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or list of strings")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Vec<String>, E> {
+            Ok(vec![v.to_string()])
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Vec<String>, A::Error> {
+            let mut vec = Vec::new();
+            while let Some(s) = seq.next_element()? {
+                vec.push(s);
+            }
+            Ok(vec)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

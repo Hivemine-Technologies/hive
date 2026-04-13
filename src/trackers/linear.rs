@@ -77,11 +77,12 @@ impl IssueTracker for LinearTracker {
             .team
             .as_deref()
             .unwrap_or(&self.tracker_config.team);
-        let status = filters
-            .status
-            .as_deref()
-            .unwrap_or(&self.tracker_config.ready_filter);
-        let query = build_issues_query(team, status, filters.project.as_deref());
+        let statuses = if filters.statuses.is_empty() {
+            &self.tracker_config.ready_filter
+        } else {
+            &filters.statuses
+        };
+        let query = build_issues_query(team, statuses, filters.project.as_deref());
         let resp = self.graphql(&query).await?;
         let issues = parse_issues_response(&resp.to_string())?;
 
@@ -205,13 +206,22 @@ impl IssueTracker for LinearTracker {
     }
 }
 
-pub fn build_issues_query(team: &str, status: &str, project: Option<&str>) -> String {
+pub fn build_issues_query(team: &str, statuses: &[String], project: Option<&str>) -> String {
     let project_filter = match project {
         Some(proj) => format!(r#", project: {{ name: {{ eq: "{proj}" }} }}"#),
         None => String::new(),
     };
+
+    // Linear supports `in` filter for matching any of multiple status names
+    let status_filter = if statuses.len() == 1 {
+        format!(r#"state: {{ name: {{ eq: "{}" }} }}"#, statuses[0])
+    } else {
+        let quoted: Vec<String> = statuses.iter().map(|s| format!(r#""{s}""#)).collect();
+        format!(r#"state: {{ name: {{ in: [{}] }} }}"#, quoted.join(", "))
+    };
+
     format!(
-        r#"query {{ issues(filter: {{ team: {{ name: {{ eq: "{team}" }} }}, state: {{ name: {{ eq: "{status}" }} }}{project_filter} }}) {{ nodes {{ identifier title priority url labels {{ nodes {{ name }} }} project {{ name }} }} }} }}"#
+        r#"query {{ issues(filter: {{ team: {{ name: {{ eq: "{team}" }} }}, {status_filter}{project_filter} }}) {{ nodes {{ identifier title priority url labels {{ nodes {{ name }} }} project {{ name }} }} }} }}"#
     )
 }
 
@@ -265,16 +275,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_ready_issues_query() {
-        let query = build_issues_query("Hivemine", "Todo", None);
+    fn test_build_ready_issues_query_single_status() {
+        let statuses = vec!["Todo".to_string()];
+        let query = build_issues_query("Hivemine", &statuses, None);
         assert!(query.contains("Hivemine"));
         assert!(query.contains("Todo"));
         assert!(query.contains("issues"));
+        assert!(query.contains(r#"eq: "Todo""#));
+    }
+
+    #[test]
+    fn test_build_ready_issues_query_multiple_statuses() {
+        let statuses = vec!["Todo".to_string(), "Ready".to_string()];
+        let query = build_issues_query("Hivemine", &statuses, None);
+        assert!(query.contains("Hivemine"));
+        assert!(query.contains(r#"in: ["Todo", "Ready"]"#));
     }
 
     #[test]
     fn test_build_issues_query_with_project() {
-        let query = build_issues_query("Hivemine", "Todo", Some("Phase 77"));
+        let statuses = vec!["Todo".to_string()];
+        let query = build_issues_query("Hivemine", &statuses, Some("Phase 77"));
         assert!(query.contains("Hivemine"));
         assert!(query.contains("Phase 77"));
     }

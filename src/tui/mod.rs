@@ -354,7 +354,7 @@ impl Tui {
             team: Some(self.tracker_config.team.clone()),
             project: None,
             labels: vec![],
-            status: Some(self.tracker_config.ready_filter.clone()),
+            statuses: self.tracker_config.ready_filter.clone(),
         };
         match self.tracker.list_ready(&filters).await {
             Ok(issues) => {
