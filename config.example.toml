@@ -24,6 +24,28 @@ api_key = "env:LINEAR_API_KEY"
 base_url = "https://mycompany.atlassian.net"
 api_token = "env:JIRA_API_TOKEN"
 email = "env:JIRA_EMAIL"
+# Per-project Jira wiring lives in the project's project.toml, e.g.:
+#
+#   tracker = "jira"
+#
+#   [tracker_config]
+#   team = "Platform Squad"                 # value of Jira's "Team" custom field
+#   ready_filter = ["To Do", "Selected for Development"]
+#
+#   [tracker_config.statuses]
+#   start = "In Progress"
+#   review = "In Review"
+#   done = "Done"
+#   # Optional: extra states after "review" that hive should treat as
+#   # already-past for idempotency (e.g., Jira workflows with a deploy step).
+#   past_review = ["In Deployment"]
+#
+#   [tracker_config.fields]
+#   jira_project = "APEX"                   # Jira project key (required)
+#   # Optional override — JQL clause name for the Team custom field.
+#   # Defaults to "Team[Team]" (Advanced Roadmaps). Some instances use
+#   # "team" or a customfield id like "cf[10001]".
+#   # jira_team_field = "cf[10001]"
 
 [notifications.discord]
 webhook_url = "env:HIVE_DISCORD_WEBHOOK"

@@ -83,6 +83,12 @@ pub struct StatusMappings {
     pub start: String,
     pub review: String,
     pub done: String,
+    /// Optional statuses that count as "already past review" for idempotent
+    /// `start_issue` / `finish_issue` calls. Useful for Jira-style workflows
+    /// that have extra states after review (e.g., "In Deployment") which hive
+    /// itself doesn't drive but should not try to transition back from.
+    #[serde(default)]
+    pub past_review: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

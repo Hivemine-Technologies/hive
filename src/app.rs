@@ -11,6 +11,7 @@ use crate::notifiers::Notifier;
 use crate::orchestrator::Orchestrator;
 use crate::runners::claude::ClaudeRunner;
 use crate::runners::AgentRunner;
+use crate::trackers::jira::JiraTracker;
 use crate::trackers::linear::LinearTracker;
 use crate::trackers::IssueTracker;
 use crate::tui::Tui;
@@ -57,6 +58,29 @@ pub async fn run(repo_path: &str) -> Result<()> {
             let api_key = resolve_env(api_key)?;
             Arc::new(LinearTracker::new(
                 api_key,
+                project.tracker_config.clone(),
+            ))
+        }
+        "jira" => {
+            let base_url = tracker_conn
+                .base_url
+                .as_ref()
+                .ok_or_else(|| HiveError::Config("jira base_url not set".to_string()))?;
+            let api_token = tracker_conn
+                .api_token
+                .as_ref()
+                .ok_or_else(|| HiveError::Config("jira api_token not set".to_string()))?;
+            let email = tracker_conn
+                .email
+                .as_ref()
+                .ok_or_else(|| HiveError::Config("jira email not set".to_string()))?;
+            let base_url = resolve_env(base_url)?;
+            let api_token = resolve_env(api_token)?;
+            let email = resolve_env(email)?;
+            Arc::new(JiraTracker::new(
+                base_url,
+                email,
+                api_token,
                 project.tracker_config.clone(),
             ))
         }
@@ -126,6 +150,22 @@ pub async fn run(repo_path: &str) -> Result<()> {
                 if std::env::var(var_name).is_err() {
                     eprintln!("⚠ {var_name} is not set. Issue tracker queries will fail.");
                     eprintln!("  Set it with: export {var_name}=lin_api_...\n");
+                }
+            }
+        }
+    } else if project.tracker == "jira" {
+        for (label, value) in [
+            ("api_token", tracker_conn.api_token.as_ref()),
+            ("email", tracker_conn.email.as_ref()),
+            ("base_url", tracker_conn.base_url.as_ref()),
+        ] {
+            if let Some(v) = value {
+                if let Some(var_name) = v.strip_prefix("env:") {
+                    if std::env::var(var_name).is_err() {
+                        eprintln!(
+                            "⚠ {var_name} (jira {label}) is not set. Jira tracker calls will fail."
+                        );
+                    }
                 }
             }
         }

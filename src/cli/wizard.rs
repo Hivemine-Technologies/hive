@@ -91,6 +91,60 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
         .unwrap_or_else(|| "Done".to_string());
     let done_status = prompt_with_default("Done status name", &default_done)?;
 
+    // Jira-specific prompts. For Linear users these are skipped entirely so
+    // their flow is unchanged.
+    let mut fields: std::collections::HashMap<String, String> = existing
+        .as_ref()
+        .map(|c| c.tracker_config.fields.clone())
+        .unwrap_or_default();
+    let mut past_review: Vec<String> = existing
+        .as_ref()
+        .map(|c| c.tracker_config.statuses.past_review.clone())
+        .unwrap_or_default();
+
+    if tracker == "jira" {
+        println!("\n  Jira-specific settings:");
+        println!("  (for `team` above: put the Jira \"Team\" custom field value, not the project key)\n");
+
+        // Required: Jira project key (the ticket prefix, e.g. "APEX")
+        let default_project_key = fields.get("jira_project").cloned().unwrap_or_default();
+        let project_key = loop {
+            let v = prompt_with_default("Jira project key (e.g. APEX)", &default_project_key)?;
+            if !v.trim().is_empty() {
+                break v.trim().to_string();
+            }
+            println!("  ✗ jira_project is required for Jira — it's the ticket prefix used in JQL.");
+        };
+        fields.insert("jira_project".to_string(), project_key);
+
+        // Optional: override the JQL clause for the Team custom field
+        let default_team_field = fields
+            .get("jira_team_field")
+            .cloned()
+            .unwrap_or_else(|| "Team[Team]".to_string());
+        let team_field = prompt_with_default(
+            "JQL name for Team field (blank = default)",
+            &default_team_field,
+        )?;
+        if team_field.trim().is_empty() || team_field == "Team[Team]" {
+            fields.remove("jira_team_field");
+        } else {
+            fields.insert("jira_team_field".to_string(), team_field);
+        }
+
+        // Optional: extra "past review" states (comma-separated)
+        let default_past_review = past_review.join(", ");
+        let past_review_input = prompt_with_default(
+            "Extra post-review statuses, comma-separated (e.g. In Deployment)",
+            &default_past_review,
+        )?;
+        past_review = past_review_input
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+
     // Auto-detect GitHub remote (or use existing values)
     let (detected_owner, detected_repo) = detect_github_remote(&PathBuf::from(&repo_path));
     let default_gh_owner = existing
@@ -196,11 +250,9 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
                 start: start_status,
                 review: review_status,
                 done: done_status,
+                past_review,
             },
-            fields: existing
-                .as_ref()
-                .map(|c| c.tracker_config.fields.clone())
-                .unwrap_or_default(),
+            fields,
         },
         phases,
     };
@@ -247,6 +299,34 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
             println!("   ✓ JIRA_API_TOKEN is set");
         } else {
             println!("   ✗ JIRA_API_TOKEN — required for Jira integration");
+            println!("     export JIRA_API_TOKEN=...  (create at id.atlassian.com/manage-profile/security/api-tokens)");
+            all_set = false;
+        }
+        if std::env::var("JIRA_EMAIL").is_ok() {
+            println!("   ✓ JIRA_EMAIL is set");
+        } else {
+            println!("   ✗ JIRA_EMAIL — required for Jira Basic auth");
+            println!("     export JIRA_EMAIL=you@company.com");
+            all_set = false;
+        }
+
+        // Check the global config has a [trackers.jira] section. Configs
+        // written before Jira support existed won't, and the app will fail
+        // at startup with "tracker 'jira' not configured in global config".
+        let global_path = config_dir.join("config.toml");
+        let global_has_jira = std::fs::read_to_string(&global_path)
+            .map(|s| s.contains("[trackers.jira]"))
+            .unwrap_or(false);
+        if !global_has_jira {
+            println!(
+                "\n   ⚠  Your global config ({}) has no [trackers.jira] section.",
+                global_path.display()
+            );
+            println!("      Add this block to the file before running `hive`:\n");
+            println!("      [trackers.jira]");
+            println!("      base_url = \"https://mycompany.atlassian.net\"");
+            println!("      api_token = \"env:JIRA_API_TOKEN\"");
+            println!("      email = \"env:JIRA_EMAIL\"");
             all_set = false;
         }
     }
@@ -307,6 +387,11 @@ default_model = "flash"
 
 [trackers.linear]
 api_key = "env:LINEAR_API_KEY"
+
+[trackers.jira]
+base_url = "https://mycompany.atlassian.net"
+api_token = "env:JIRA_API_TOKEN"
+email = "env:JIRA_EMAIL"
 
 [notifications.discord]
 webhook_url = "env:HIVE_DISCORD_WEBHOOK"
