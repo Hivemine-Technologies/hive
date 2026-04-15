@@ -151,20 +151,48 @@ impl GitHubClient {
     }
 
     pub async fn poll_reviews(&self, pr_number: u64) -> Result<Vec<ReviewComment>> {
-        let resp = self
-            .get(&format!("/pulls/{pr_number}/comments"))
-            .await?;
-        let comments = resp
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .map(|c| ReviewComment {
-                id: c["id"].as_u64().unwrap_or(0),
-                author: c["user"]["login"].as_str().unwrap_or("").to_string(),
-                body: c["body"].as_str().unwrap_or("").to_string(),
-                is_bot: c["user"]["type"].as_str() == Some("Bot"),
-            })
-            .collect();
+        let mut comments = Vec::new();
+
+        // 1. Inline diff comments (line-level annotations)
+        if let Ok(resp) = self.get(&format!("/pulls/{pr_number}/comments")).await {
+            for c in resp.as_array().unwrap_or(&Vec::new()) {
+                comments.push(ReviewComment {
+                    id: format!("inline-{}", c["id"].as_u64().unwrap_or(0)),
+                    author: c["user"]["login"].as_str().unwrap_or("").to_string(),
+                    body: c["body"].as_str().unwrap_or("").to_string(),
+                    is_bot: c["user"]["type"].as_str() == Some("Bot"),
+                });
+            }
+        }
+
+        // 2. PR review bodies (top-level reviews from bots like CodeRabbit)
+        if let Ok(resp) = self.get(&format!("/pulls/{pr_number}/reviews")).await {
+            for r in resp.as_array().unwrap_or(&Vec::new()) {
+                let body = r["body"].as_str().unwrap_or("");
+                if body.is_empty() {
+                    continue;
+                }
+                comments.push(ReviewComment {
+                    id: format!("review-{}", r["id"].as_u64().unwrap_or(0)),
+                    author: r["user"]["login"].as_str().unwrap_or("").to_string(),
+                    body: body.to_string(),
+                    is_bot: r["user"]["type"].as_str() == Some("Bot"),
+                });
+            }
+        }
+
+        // 3. Issue comments (general PR comments)
+        if let Ok(resp) = self.get(&format!("/issues/{pr_number}/comments")).await {
+            for c in resp.as_array().unwrap_or(&Vec::new()) {
+                comments.push(ReviewComment {
+                    id: format!("issue-{}", c["id"].as_u64().unwrap_or(0)),
+                    author: c["user"]["login"].as_str().unwrap_or("").to_string(),
+                    body: c["body"].as_str().unwrap_or("").to_string(),
+                    is_bot: c["user"]["type"].as_str() == Some("Bot"),
+                });
+            }
+        }
+
         Ok(comments)
     }
 
@@ -196,7 +224,7 @@ pub enum CiStatus {
 
 #[derive(Debug, Clone)]
 pub struct ReviewComment {
-    pub id: u64,
+    pub id: String,
     pub author: String,
     pub body: String,
     pub is_bot: bool,

@@ -75,24 +75,18 @@ pub fn build_ci_fix_prompt(
 /// Build a prompt for addressing bot review comments.
 pub fn build_bot_review_fix_prompt(
     issue_id: &str,
+    issue_title: &str,
     comments: &[String],
 ) -> String {
     let comment_text = comments.join("\n---\n");
     format!(
-        "Address these review comments for story {issue_id}:\n\n{comment_text}"
-    )
-}
-
-/// Build a prompt for crash recovery (resuming interrupted work).
-pub fn build_resume_prompt(
-    phase: &Phase,
-    issue_id: &str,
-    issue_title: &str,
-) -> String {
-    format!(
-        "You are resuming work on story {issue_id}: {issue_title}.\n\n\
-         Review the current state of the worktree and continue from where you left off. \
-         The previous phase was {phase}."
+        "You are working on story {issue_id}: {issue_title}.\n\n\
+         Bot reviewers have left feedback on the pull request. CI is passing — \
+         these are code quality and style suggestions, not build failures.\n\n\
+         Review each comment, apply the suggestions that improve the code, and \
+         commit your changes. If a suggestion is incorrect or not applicable, \
+         skip it.\n\n\
+         ## Review Comments\n\n{comment_text}"
     )
 }
 
@@ -189,19 +183,13 @@ mod tests {
     fn test_bot_review_fix_prompt() {
         let prompt = build_bot_review_fix_prompt(
             "APX-245",
+            "Add NumberSequence",
             &["Consider using Option here".to_string()],
         );
         assert!(prompt.contains("Consider using Option"));
+        assert!(prompt.contains("APX-245"));
+        assert!(prompt.contains("Add NumberSequence"));
+        assert!(prompt.contains("code quality"));
     }
 
-    #[test]
-    fn test_resume_prompt() {
-        let prompt = build_resume_prompt(
-            &Phase::Implement,
-            "APX-245",
-            "Add NumberSequence",
-        );
-        assert!(prompt.contains("resuming"));
-        assert!(prompt.contains("Implement"));
-    }
 }

@@ -341,7 +341,7 @@ async fn run_bot_reviews(
     runner: &dyn AgentRunner,
     pr_number: u64,
     issue_id: &str,
-    _issue_title: &str,
+    issue_title: &str,
     working_dir: &std::path::Path,
     phase_config: Option<&PhaseConfig>,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
@@ -360,7 +360,7 @@ async fn run_bot_reviews(
 
     let mut fix_cycles: u8 = 0;
     let mut total_cost = 0.0;
-    let mut seen_comment_ids: std::collections::HashSet<u64> =
+    let mut seen_comment_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     let mut quiet_polls: u8 = 0;
     let mut interval = tokio::time::interval(poll_interval);
@@ -404,7 +404,7 @@ async fn run_bot_reviews(
 
         // Track all comment IDs
         for comment in &comments {
-            seen_comment_ids.insert(comment.id);
+            seen_comment_ids.insert(comment.id.clone());
         }
 
         if new_bot_comments.is_empty() {
@@ -461,7 +461,7 @@ async fn run_bot_reviews(
         )
         .await;
 
-        let fix_prompt = prompts::build_bot_review_fix_prompt(issue_id, &comment_bodies);
+        let fix_prompt = prompts::build_bot_review_fix_prompt(issue_id, issue_title, &comment_bodies);
         let fix_config = SessionConfig {
             working_dir: working_dir.to_path_buf(),
             system_prompt: fix_prompt,
