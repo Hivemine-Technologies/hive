@@ -160,15 +160,7 @@ impl AgentRunner for ClaudeRunner {
 
         Ok(SessionHandle {
             session_id,
-            runner_name: "claude".to_string(),
-            pid,
         })
-    }
-
-    async fn send_prompt(&self, _session: &SessionHandle, _prompt: &str) -> Result<()> {
-        // Claude Code doesn't support sending additional prompts to a running session.
-        // Use --resume to start a new session that continues from a previous one.
-        Ok(())
     }
 
     fn output_stream(
@@ -210,73 +202,6 @@ impl AgentRunner for ClaudeRunner {
             let _ = running.child.kill().await;
         }
         Ok(())
-    }
-
-    async fn resume(&self, session: &SessionHandle) -> Result<()> {
-        // Build a new process with --resume <session_id>
-        // This creates a brand-new child that continues the previous conversation
-        let mut sessions = self.sessions.lock().await;
-
-        let resume_id = &session.session_id;
-
-        let mut cmd = Command::new(&self.command);
-        cmd.arg("--resume")
-            .arg(resume_id)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose");
-
-        let model = &self.default_model;
-        cmd.arg("--model").arg(model);
-
-        if let Some(ref pm) = self.permission_mode {
-            cmd.arg("--permission-mode").arg(pm);
-        }
-
-        use std::process::Stdio;
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| HiveError::Agent(format!("failed to spawn claude --resume: {e}")))?;
-
-        let pid = child.id();
-        let new_session_id = pid
-            .map(|p| p.to_string())
-            .unwrap_or_else(uuid_simple);
-
-        let event_rx = Self::spawn_stdout_reader(&mut child);
-
-        let running = RunningSession {
-            child,
-            event_rx: Some(event_rx),
-            session_id: new_session_id.clone(),
-        };
-
-        // Remove old entry, insert new
-        sessions.remove(&session.session_id);
-        sessions.insert(new_session_id, running);
-
-        Ok(())
-    }
-
-    async fn is_alive(&self, session: &SessionHandle) -> bool {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(running) = sessions.get_mut(&session.session_id) {
-            match running.child.try_wait() {
-                Ok(Some(_)) => false, // exited
-                Ok(None) => true,     // still running
-                Err(_) => false,
-            }
-        } else {
-            false
-        }
-    }
-
-    fn name(&self) -> &str {
-        "claude"
     }
 }
 
@@ -452,21 +377,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_is_alive_returns_false_for_missing_session() {
-        let runner = ClaudeRunner::new(
-            "echo".to_string(),
-            "test-model".to_string(),
-            None,
-        );
-        let handle = SessionHandle {
-            session_id: "nonexistent".to_string(),
-            runner_name: "claude".to_string(),
-            pid: None,
-        };
-        assert!(!runner.is_alive(&handle).await);
-    }
-
-    #[tokio::test]
     async fn test_cancel_nonexistent_session_is_ok() {
         let runner = ClaudeRunner::new(
             "echo".to_string(),
@@ -475,8 +385,6 @@ mod tests {
         );
         let handle = SessionHandle {
             session_id: "nonexistent".to_string(),
-            runner_name: "claude".to_string(),
-            pid: None,
         };
         assert!(runner.cancel(&handle).await.is_ok());
     }

@@ -26,9 +26,6 @@ pub enum HiveError {
     #[error("tracker error: {0}")]
     Tracker(String),
 
-    #[error("orchestrator error: {0}")]
-    Orchestrator(String),
-
     #[error("phase error in {phase}: {message}")]
     Phase { phase: String, message: String },
 

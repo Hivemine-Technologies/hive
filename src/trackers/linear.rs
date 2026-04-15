@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use super::IssueTracker;
 use crate::config::TrackerConfig;
-use crate::domain::{FollowUpContent, Issue, IssueDetail, IssueFilters};
+use crate::domain::{Issue, IssueDetail, IssueFilters};
 use crate::error::{HiveError, Result};
 
 pub struct LinearTracker {
@@ -112,58 +112,6 @@ impl IssueTracker for LinearTracker {
             .await
     }
 
-    async fn create_followup(&self, parent_id: &str, content: FollowUpContent) -> Result<String> {
-        let team = &self.tracker_config.team;
-        let team_query = format!(
-            r#"query {{ teams(filter: {{ name: {{ eq: "{team}" }} }}) {{ nodes {{ id }} }} }}"#
-        );
-        let team_resp = self.graphql(&team_query).await?;
-        let team_id = team_resp["data"]["teams"]["nodes"][0]["id"]
-            .as_str()
-            .ok_or_else(|| HiveError::Tracker(format!("team '{team}' not found")))?;
-
-        let title = content.title.replace('"', r#"\""#);
-        let description = content.description.replace('"', r#"\""#);
-        let labels_fragment = if content.labels.is_empty() {
-            String::new()
-        } else {
-            let label_query = format!(
-                r#"query {{ issueLabels(filter: {{ team: {{ name: {{ eq: "{team}" }} }} }}) {{ nodes {{ id name }} }} }}"#
-            );
-            let label_resp = self.graphql(&label_query).await?;
-            let empty_vec = vec![];
-            let label_nodes = label_resp["data"]["issueLabels"]["nodes"]
-                .as_array()
-                .unwrap_or(&empty_vec);
-            let label_ids: Vec<String> = label_nodes
-                .iter()
-                .filter_map(|node| {
-                    let name = node["name"].as_str()?;
-                    if content.labels.contains(&name.to_string()) {
-                        node["id"].as_str().map(|id| format!("\"{id}\""))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if label_ids.is_empty() {
-                String::new()
-            } else {
-                format!(", labelIds: [{}]", label_ids.join(", "))
-            }
-        };
-
-        let parent_id_escaped = parent_id.replace('"', r#"\""#);
-        let mutation = format!(
-            r#"mutation {{ issueCreate(input: {{ teamId: "{team_id}", title: "{title}", description: "{description}", parentId: "{parent_id_escaped}"{labels_fragment} }}) {{ issue {{ identifier }} }} }}"#
-        );
-        let resp = self.graphql(&mutation).await?;
-        let identifier = resp["data"]["issueCreate"]["issue"]["identifier"]
-            .as_str()
-            .ok_or_else(|| HiveError::Tracker("failed to create follow-up issue".to_string()))?;
-        Ok(identifier.to_string())
-    }
-
     async fn get_issue(&self, id: &str) -> Result<IssueDetail> {
         let query = format!(
             r#"query {{ issue(id: "{id}") {{ identifier title description url priority labels {{ nodes {{ name }} }} }} }}"#
@@ -201,9 +149,6 @@ impl IssueTracker for LinearTracker {
         })
     }
 
-    fn name(&self) -> &str {
-        "linear"
-    }
 }
 
 pub fn build_issues_query(team: &str, statuses: &[String], project: Option<&str>) -> String {

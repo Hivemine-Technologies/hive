@@ -7,7 +7,6 @@ use crate::error::{HiveError, Result};
 
 const COLOR_GREEN: u32 = 3_066_993;
 const COLOR_YELLOW: u32 = 15_844_367;
-const COLOR_GRAY: u32 = 9_807_270;
 const COLOR_RED: u32 = 15_158_332;
 
 pub struct DiscordNotifier {
@@ -51,15 +50,6 @@ impl DiscordNotifier {
                     }]
                 })
             }
-            NotifyEvent::AllIdle => {
-                serde_json::json!({
-                    "embeds": [{
-                        "title": "All Idle",
-                        "description": "No stories are currently running.",
-                        "color": COLOR_GRAY,
-                    }]
-                })
-            }
             NotifyEvent::CiFailedMaxRetries { issue_id } => {
                 serde_json::json!({
                     "embeds": [{
@@ -94,9 +84,6 @@ impl Notifier for DiscordNotifier {
         Ok(())
     }
 
-    fn name(&self) -> &str {
-        "discord"
-    }
 }
 
 #[cfg(test)]
@@ -128,15 +115,6 @@ mod tests {
         let msg = notifier.format_message(&event);
         let desc = msg["embeds"][0]["description"].as_str().unwrap();
         assert!(desc.contains("Bot review fix attempts exhausted"));
-    }
-
-    #[test]
-    fn test_format_all_idle_message() {
-        let notifier = DiscordNotifier::new("https://example.com".to_string());
-        let event = NotifyEvent::AllIdle;
-        let msg = notifier.format_message(&event);
-        let color = msg["embeds"][0]["color"].as_u64().unwrap();
-        assert_eq!(color, COLOR_GRAY as u64);
     }
 
     #[test]

@@ -79,9 +79,6 @@ impl Phase {
         all.iter().position(|p| p.config_key() == self.config_key())
     }
 
-    pub fn pipeline_len() -> usize {
-        PIPELINE_PHASES.len()
-    }
 }
 
 impl fmt::Display for Phase {

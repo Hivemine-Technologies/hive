@@ -34,22 +34,4 @@ impl Tab {
         }
     }
 
-    pub fn from_index(i: usize) -> Self {
-        match i {
-            0 => Tab::Agents,
-            1 => Tab::Stories,
-            2 => Tab::Worktrees,
-            3 => Tab::Config,
-            _ => Tab::Agents,
-        }
-    }
-
-    pub fn next(&self) -> Self {
-        Self::from_index((self.index() + 1) % Self::all().len())
-    }
-
-    pub fn prev(&self) -> Self {
-        let len = Self::all().len();
-        Self::from_index((self.index() + len - 1) % len)
-    }
 }

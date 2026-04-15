@@ -97,9 +97,7 @@ pub fn rebase_worktree(worktree_path: &Path) -> Result<RebaseResult> {
         .current_dir(worktree_path)
         .output()?;
     if !fetch.status.success() {
-        return Ok(RebaseResult::Failed {
-            reason: String::from_utf8_lossy(&fetch.stderr).to_string(),
-        });
+        return Ok(RebaseResult::Failed);
     }
     let rebase = Command::new("git")
         .args(["rebase", "origin/master"])
@@ -112,9 +110,7 @@ pub fn rebase_worktree(worktree_path: &Path) -> Result<RebaseResult> {
             .args(["rebase", "--abort"])
             .current_dir(worktree_path)
             .output();
-        Ok(RebaseResult::Conflicts {
-            message: String::from_utf8_lossy(&rebase.stderr).to_string(),
-        })
+        Ok(RebaseResult::Conflicts)
     }
 }
 
@@ -128,8 +124,8 @@ pub struct WorktreeInfo {
 #[derive(Debug)]
 pub enum RebaseResult {
     Success,
-    Conflicts { message: String },
-    Failed { reason: String },
+    Conflicts,
+    Failed,
 }
 
 #[cfg(test)]

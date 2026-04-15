@@ -11,13 +11,6 @@ pub fn save_run(runs_dir: &Path, run: &StoryRun) -> Result<()> {
     Ok(())
 }
 
-pub fn load_run(runs_dir: &Path, issue_id: &str) -> Result<StoryRun> {
-    let path = runs_dir.join(format!("{issue_id}.json"));
-    let content = std::fs::read_to_string(&path)?;
-    let run: StoryRun = serde_json::from_str(&content)?;
-    Ok(run)
-}
-
 pub fn load_all_runs(runs_dir: &Path) -> Result<Vec<StoryRun>> {
     if !runs_dir.exists() {
         return Ok(Vec::new());
@@ -35,28 +28,10 @@ pub fn load_all_runs(runs_dir: &Path) -> Result<Vec<StoryRun>> {
     Ok(runs)
 }
 
-pub fn delete_run(runs_dir: &Path, issue_id: &str) -> Result<()> {
-    let path = runs_dir.join(format!("{issue_id}.json"));
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::story_run::StoryRun;
-
-    #[test]
-    fn test_save_and_load_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let run = StoryRun::new("APX-245".to_string(), "Add NumberSequenceService".to_string());
-        save_run(dir.path(), &run).unwrap();
-        let loaded = load_run(dir.path(), "APX-245").unwrap();
-        assert_eq!(loaded.issue_id, "APX-245");
-        assert_eq!(loaded.issue_title, "Add NumberSequenceService");
-    }
 
     #[test]
     fn test_load_all_runs() {
@@ -67,23 +42,6 @@ mod tests {
         save_run(dir.path(), &run2).unwrap();
         let all = load_all_runs(dir.path()).unwrap();
         assert_eq!(all.len(), 2);
-    }
-
-    #[test]
-    fn test_delete_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let run = StoryRun::new("APX-245".to_string(), "Story".to_string());
-        save_run(dir.path(), &run).unwrap();
-        assert!(dir.path().join("APX-245.json").exists());
-        delete_run(dir.path(), "APX-245").unwrap();
-        assert!(!dir.path().join("APX-245.json").exists());
-    }
-
-    #[test]
-    fn test_load_nonexistent_returns_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let result = load_run(dir.path(), "NOPE-999");
-        assert!(result.is_err());
     }
 
     #[test]

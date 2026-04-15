@@ -14,13 +14,6 @@ pub enum OrchestratorEvent {
         from: Phase,
         to: Phase,
     },
-    StoriesLoaded {
-        issues: Vec<Issue>,
-    },
-    Error {
-        issue_id: Option<String>,
-        message: String,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -29,8 +22,7 @@ pub enum TuiCommand {
     CancelStory { issue_id: String },
     RetryStory { issue_id: String },
     RebaseStory { issue_id: String },
-    CopyWorktreePath { issue_id: String },
-    RefreshStories,
+    CopyWorktreePath,
     Quit,
 }
 
@@ -41,15 +33,10 @@ pub enum AgentEvent {
         tool: String,
         input_preview: String,
     },
-    ToolResult {
-        tool: String,
-        success: bool,
-    },
     Error(String),
     Complete {
         cost_usd: f64,
     },
-    CostUpdate(f64),
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +51,6 @@ pub enum NotifyEvent {
         issue_id: String,
         reason: String,
     },
-    AllIdle,
     CiFailedMaxRetries {
         issue_id: String,
     },

@@ -139,7 +139,7 @@ impl Tui {
     }
 
     fn render_help_overlay(&self, frame: &mut ratatui::Frame) {
-        use ratatui::layout::{Constraint, Flex, Layout, Rect};
+        use ratatui::layout::{Constraint, Layout};
         use ratatui::style::{Color, Modifier, Style};
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -308,10 +308,10 @@ impl Tui {
                     }
                 }
                 KeyCode::Char('o') => {
-                    if let Some(id) = selected_issue_id {
+                    if selected_issue_id.is_some() {
                         let _ = self
                             .command_tx
-                            .send(TuiCommand::CopyWorktreePath { issue_id: id })
+                            .send(TuiCommand::CopyWorktreePath)
                             .await;
                     }
                 }
@@ -576,18 +576,9 @@ impl Tui {
                     } => {
                         format!("[tool] {tool}: {input_preview}")
                     }
-                    AgentEvent::ToolResult { tool, success } => {
-                        format!(
-                            "[result] {tool}: {}",
-                            if *success { "ok" } else { "fail" }
-                        )
-                    }
                     AgentEvent::Error(msg) => format!("[ERROR] {msg}"),
                     AgentEvent::Complete { cost_usd } => {
                         format!("[complete] cost: ${cost_usd:.2}")
-                    }
-                    AgentEvent::CostUpdate(cost) => {
-                        format!("[cost] ${cost:.2}")
                     }
                 };
                 self.agents_state.append_log(&issue_id, line);
@@ -599,13 +590,6 @@ impl Tui {
             } => {
                 self.agents_state
                     .append_log(&issue_id, format!("--- Phase: {from} -> {to} ---"));
-            }
-            OrchestratorEvent::StoriesLoaded { issues } => {
-                self.stories_state.issues = issues;
-                self.stories_state.loading = false;
-            }
-            OrchestratorEvent::Error { message, .. } => {
-                tracing::error!("orchestrator error: {message}");
             }
         }
     }

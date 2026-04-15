@@ -38,9 +38,6 @@ impl LogBuffer {
         self.lines.is_empty()
     }
 
-    pub fn clear(&mut self) {
-        self.lines.clear();
-    }
 }
 
 pub fn render_log(
@@ -129,14 +126,6 @@ mod tests {
         assert_eq!(buf.len(), 2);
         assert_eq!(buf.lines()[0], "b");
         assert_eq!(buf.lines()[1], "c");
-    }
-
-    #[test]
-    fn test_log_buffer_clear() {
-        let mut buf = LogBuffer::new(10);
-        buf.push("test".to_string());
-        buf.clear();
-        assert!(buf.is_empty());
     }
 
     #[test]

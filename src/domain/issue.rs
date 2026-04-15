@@ -28,10 +28,3 @@ pub struct IssueFilters {
     pub labels: Vec<String>,
     pub statuses: Vec<String>,
 }
-
-#[derive(Debug, Clone)]
-pub struct FollowUpContent {
-    pub title: String,
-    pub description: String,
-    pub labels: Vec<String>,
-}
