@@ -515,17 +515,49 @@ async fn run_bot_reviews(
             let _ = github.post_pr_comment(pr_number, &summary).await;
         }
 
-        send_and_log(
-            event_tx,
-            runs_dir,
-            issue_id,
-            AgentEvent::TextDelta(format!(
-                "[Bot Reviews] Replied to {inline_replied} inline comment(s), \
-                 posted summary for {} review comment(s). Resuming polling...\n",
-                summary_items.len()
-            )),
-        )
-        .await;
+        // Resolve review threads via GraphQL
+        let bot_authors: Vec<String> = new_bot_comments
+            .iter()
+            .map(|c| c.author.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        match github
+            .list_unresolved_bot_threads(pr_number, &bot_authors)
+            .await
+        {
+            Ok(thread_ids) if !thread_ids.is_empty() => {
+                let count = thread_ids.len();
+                for tid in &thread_ids {
+                    let _ = github.resolve_review_thread(tid).await;
+                }
+                send_and_log(
+                    event_tx,
+                    runs_dir,
+                    issue_id,
+                    AgentEvent::TextDelta(format!(
+                        "[Bot Reviews] Resolved {count} review thread(s). \
+                         Replied to {inline_replied} inline comment(s), \
+                         posted summary for {} review comment(s). Resuming polling...\n",
+                        summary_items.len()
+                    )),
+                )
+                .await;
+            }
+            _ => {
+                send_and_log(
+                    event_tx,
+                    runs_dir,
+                    issue_id,
+                    AgentEvent::TextDelta(format!(
+                        "[Bot Reviews] Replied to {inline_replied} inline comment(s), \
+                         posted summary for {} review comment(s). Resuming polling...\n",
+                        summary_items.len()
+                    )),
+                )
+                .await;
+            }
+        }
     }
 }
 

@@ -27,6 +27,32 @@ impl GitHubClient {
         )
     }
 
+    async fn graphql(&self, query: &str) -> Result<Value> {
+        let payload = serde_json::json!({ "query": query });
+        let resp = self
+            .client
+            .post("https://api.github.com/graphql")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("User-Agent", "hive")
+            .json(&payload)
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(HiveError::Tracker(format!(
+                "GitHub GraphQL error ({status}): {text}"
+            )));
+        }
+        let val: Value = serde_json::from_str(&text)?;
+        if let Some(errors) = val.get("errors") {
+            return Err(HiveError::Tracker(format!(
+                "GitHub GraphQL errors: {errors}"
+            )));
+        }
+        Ok(val)
+    }
+
     async fn get(&self, path: &str) -> Result<Value> {
         let resp = self
             .client
@@ -194,6 +220,80 @@ impl GitHubClient {
         }
 
         Ok(comments)
+    }
+
+    /// Fetch unresolved review thread IDs for bot authors on a PR.
+    ///
+    /// Returns GraphQL node IDs that can be passed to `resolve_review_thread`.
+    pub async fn list_unresolved_bot_threads(
+        &self,
+        pr_number: u64,
+        bot_authors: &[String],
+    ) -> Result<Vec<String>> {
+        let query = format!(
+            r#"query {{
+              repository(owner: "{}", name: "{}") {{
+                pullRequest(number: {}) {{
+                  reviewThreads(first: 100) {{
+                    nodes {{
+                      id
+                      isResolved
+                      comments(first: 1) {{
+                        nodes {{
+                          author {{ login }}
+                        }}
+                      }}
+                    }}
+                  }}
+                }}
+              }}
+            }}"#,
+            self.owner, self.repo, pr_number
+        );
+
+        let resp = self.graphql(&query).await?;
+        let threads = resp["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        let mut thread_ids = Vec::new();
+        for thread in &threads {
+            if thread["isResolved"].as_bool() == Some(true) {
+                continue;
+            }
+            let author = thread["comments"]["nodes"]
+                .as_array()
+                .and_then(|c| c.first())
+                .and_then(|c| c["author"]["login"].as_str())
+                .unwrap_or("");
+            let is_match = bot_authors.is_empty()
+                || bot_authors
+                    .iter()
+                    .any(|b| author.to_lowercase().contains(&b.to_lowercase()));
+            if is_match {
+                if let Some(id) = thread["id"].as_str() {
+                    thread_ids.push(id.to_string());
+                }
+            }
+        }
+
+        Ok(thread_ids)
+    }
+
+    /// Resolve a PR review thread by its GraphQL node ID.
+    pub async fn resolve_review_thread(&self, thread_id: &str) -> Result<()> {
+        let query = format!(
+            r#"mutation {{
+              resolveReviewThread(input: {{ threadId: "{thread_id}" }}) {{
+                thread {{ isResolved }}
+              }}
+            }}"#
+        );
+        if let Err(e) = self.graphql(&query).await {
+            tracing::warn!("Failed to resolve review thread {thread_id}: {e}");
+        }
+        Ok(())
     }
 
     /// Reply to an inline review comment on a PR.
