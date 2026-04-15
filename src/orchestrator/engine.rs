@@ -321,13 +321,24 @@ async fn run_ci_watch(
                     run_fix_agent(runner, fix_config, issue_id, event_tx, runs_dir).await?;
                 total_cost += fix_result.cost_usd;
 
-                // After fix agent completes, push and resume polling
+                // Push fixes so CI picks them up
                 send_and_log(
                     event_tx,
                     runs_dir,
                     issue_id,
                     AgentEvent::TextDelta(
-                        "[CI Watch] Fix agent completed. Resuming CI polling...\n".to_string(),
+                        "[CI Watch] Fix agent completed. Pushing fixes...\n".to_string(),
+                    ),
+                )
+                .await;
+                github.push_current_branch(working_dir).await?;
+
+                send_and_log(
+                    event_tx,
+                    runs_dir,
+                    issue_id,
+                    AgentEvent::TextDelta(
+                        "[CI Watch] Pushed. Resuming CI polling...\n".to_string(),
                     ),
                 )
                 .await;
@@ -472,6 +483,18 @@ async fn run_bot_reviews(
         let fix_result = run_fix_agent(runner, fix_config, issue_id, event_tx, runs_dir).await?;
         total_cost += fix_result.cost_usd;
 
+        // Push fixes so bot reviewers see updated code
+        send_and_log(
+            event_tx,
+            runs_dir,
+            issue_id,
+            AgentEvent::TextDelta(
+                "[Bot Reviews] Fix agent completed. Pushing fixes...\n".to_string(),
+            ),
+        )
+        .await;
+        github.push_current_branch(working_dir).await?;
+
         // Reply to each comment and post summary on the PR
         send_and_log(
             event_tx,
@@ -615,6 +638,86 @@ pub fn parse_poll_interval(interval_str: Option<&str>) -> Duration {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-review fix cycle
+// ---------------------------------------------------------------------------
+
+/// After CrossReview produces REVIEW.md, check for findings and spawn a fix
+/// agent to address them. Returns the fix cost, or 0 if no findings.
+pub async fn fix_cross_review_findings(
+    runner: &dyn AgentRunner,
+    issue_id: &str,
+    issue_title: &str,
+    working_dir: &std::path::Path,
+    model: Option<&str>,
+    event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &std::path::Path,
+) -> Result<f64> {
+    let review_path = working_dir.join("REVIEW.md");
+    let review_content = match std::fs::read_to_string(&review_path) {
+        Ok(content) => content,
+        Err(_) => {
+            send_and_log(
+                event_tx,
+                runs_dir,
+                issue_id,
+                AgentEvent::TextDelta(
+                    "[Cross Review] No REVIEW.md found — skipping fix cycle.\n".to_string(),
+                ),
+            )
+            .await;
+            return Ok(0.0);
+        }
+    };
+
+    let content_lower = review_content.to_lowercase();
+    if content_lower.contains("lgtm") && !content_lower.contains("must-fix") {
+        send_and_log(
+            event_tx,
+            runs_dir,
+            issue_id,
+            AgentEvent::TextDelta(
+                "[Cross Review] REVIEW.md is LGTM — no fixes needed.\n".to_string(),
+            ),
+        )
+        .await;
+        return Ok(0.0);
+    }
+
+    send_and_log(
+        event_tx,
+        runs_dir,
+        issue_id,
+        AgentEvent::TextDelta(
+            "[Cross Review] Findings detected in REVIEW.md. Spawning fix agent...\n".to_string(),
+        ),
+    )
+    .await;
+
+    let fix_prompt = prompts::build_cross_review_fix_prompt(issue_id, issue_title, &review_content);
+    let fix_config = SessionConfig {
+        working_dir: working_dir.to_path_buf(),
+        system_prompt: fix_prompt,
+        model: model.map(|s| s.to_string()),
+        permission_mode: None,
+    };
+
+    let result = run_fix_agent(runner, fix_config, issue_id, event_tx, runs_dir).await?;
+
+    send_and_log(
+        event_tx,
+        runs_dir,
+        issue_id,
+        AgentEvent::TextDelta(format!(
+            "[Cross Review] Fix agent completed. Cost: ${:.2}\n",
+            result.cost_usd
+        )),
+    )
+    .await;
+
+    Ok(result.cost_usd)
+}
+
+// ---------------------------------------------------------------------------
 // Direct phases (RaisePr, Handoff)
 // ---------------------------------------------------------------------------
 
@@ -659,7 +762,11 @@ pub async fn run_direct_phase(
             .await
         }
         Phase::Handoff => {
-            run_handoff(tracker, issue_id, pr, cost_usd, started_at, event_tx, runs_dir).await
+            run_handoff(
+                github, tracker, issue_id, issue_title, pr, cost_usd, started_at, event_tx,
+                runs_dir,
+            )
+            .await
         }
         _ => Err(HiveError::Phase {
             phase: phase.to_string(),
@@ -727,8 +834,10 @@ async fn run_raise_pr(
 }
 
 async fn run_handoff(
+    github: &GitHubClient,
     _tracker: &dyn IssueTracker,
     issue_id: &str,
+    issue_title: &str,
     pr: Option<&PrHandle>,
     cost_usd: f64,
     started_at: chrono::DateTime<chrono::Utc>,
@@ -739,17 +848,33 @@ async fn run_handoff(
         .signed_duration_since(started_at)
         .num_seconds()
         .max(0) as u64;
+    let duration_mins = duration / 60;
     let pr_url = pr
         .map(|p| p.url.clone())
         .unwrap_or_else(|| "N/A".to_string());
+
+    // Post summary comment on the PR
+    if let Some(pr_handle) = pr {
+        let summary = format!(
+            "## Hive Summary\n\n\
+             **Story:** {issue_id} — {issue_title}\n\
+             **Cost:** ${cost_usd:.2}\n\
+             **Duration:** {duration_mins}m\n\n\
+             This PR was generated by [Hive](https://github.com/hivemine/hive) and is \
+             ready for human review.\n\n\
+             ---\n*Automated by Hive*"
+        );
+        if let Err(e) = github.post_pr_comment(pr_handle.number, &summary).await {
+            tracing::warn!("Failed to post handoff summary on PR #{}: {e}", pr_handle.number);
+        }
+    }
 
     send_and_log(
         event_tx,
         runs_dir,
         issue_id,
         AgentEvent::TextDelta(format!(
-            "[Handoff] Story complete. Cost: ${cost_usd:.2}, Duration: {}m, PR: {pr_url}\n",
-            duration / 60
+            "[Handoff] Story complete. Cost: ${cost_usd:.2}, Duration: {duration_mins}m, PR: {pr_url}\n",
         )),
     )
     .await;

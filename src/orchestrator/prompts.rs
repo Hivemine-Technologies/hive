@@ -135,6 +135,27 @@ pub fn build_ci_fix_prompt(
     )
 }
 
+/// Build a prompt for fixing cross-review findings from REVIEW.md.
+pub fn build_cross_review_fix_prompt(
+    issue_id: &str,
+    issue_title: &str,
+    review_content: &str,
+) -> String {
+    format!(
+        "You are fixing issues found during cross-review of story {issue_id}: {issue_title}.\n\n\
+         {CONVENTIONS_PREAMBLE}\n\n\
+         An independent reviewer examined your implementation and produced the following \
+         findings. Fix all must-fix issues. Address suggestions that improve the code. \
+         Skip any that are incorrect or not applicable.\n\n\
+         ## Review Findings\n\n{review_content}\n\n\
+         ## Approach\n\
+         1. Fix must-fix issues first (correctness, safety, resource leaks)\n\
+         2. Then address style/quality suggestions\n\
+         3. Run the project's verification command after fixes\n\
+         4. Commit fixes: `fix({issue_id}): address cross-review - <what changed>`"
+    )
+}
+
 /// Build a prompt for addressing bot review comments.
 pub fn build_bot_review_fix_prompt(
     issue_id: &str,

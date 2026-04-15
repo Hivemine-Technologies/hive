@@ -296,6 +296,25 @@ impl GitHubClient {
         Ok(())
     }
 
+    /// Push the current branch from a worktree. Assumes upstream is already set
+    /// (via `push -u` during RaisePr).
+    pub async fn push_current_branch(
+        &self,
+        worktree_path: &std::path::Path,
+    ) -> Result<()> {
+        let output = std::process::Command::new("git")
+            .args(["push"])
+            .current_dir(worktree_path)
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(HiveError::Git(git2::Error::from_str(&format!(
+                "push failed: {stderr}"
+            ))));
+        }
+        Ok(())
+    }
+
     /// Reply to an inline review comment on a PR.
     pub async fn reply_to_inline_comment(
         &self,

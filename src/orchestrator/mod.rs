@@ -412,6 +412,27 @@ async fn story_phase_loop(
                 }
             }
 
+            // After a successful CrossReview, check REVIEW.md for findings
+            // and spawn a fix agent (using the implement runner) to address them.
+            if matches!(outcome, PhaseOutcome::Success)
+                && matches!(run.phase, Phase::CrossReview)
+            {
+                let implement_config = config.phases.get("implement");
+                let (_, fix_model) =
+                    engine::resolve_phase_runner_config(&Phase::Implement, implement_config);
+                let fix_cost = engine::fix_cross_review_findings(
+                    runner.as_ref(),
+                    &issue_id,
+                    &issue_detail.title,
+                    working_dir,
+                    fix_model,
+                    &event_tx,
+                    &runs_dir,
+                )
+                .await?;
+                run.cost_usd += fix_cost;
+            }
+
             outcome
         } else if run.phase.is_polling_phase() {
             if let Some(g) = &github {
