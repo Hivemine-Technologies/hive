@@ -196,6 +196,59 @@ impl GitHubClient {
         Ok(comments)
     }
 
+    /// Reply to an inline review comment on a PR.
+    pub async fn reply_to_inline_comment(
+        &self,
+        pr_number: u64,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<()> {
+        let payload = serde_json::json!({ "body": body });
+        let resp = self
+            .client
+            .post(self.api_url(&format!(
+                "/pulls/{pr_number}/comments/{comment_id}/replies"
+            )))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("User-Agent", "hive")
+            .header("Accept", "application/vnd.github+json")
+            .json(&payload)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            tracing::warn!(
+                "Failed to reply to inline comment {comment_id} on PR #{pr_number}: {}",
+                resp.status()
+            );
+        }
+        Ok(())
+    }
+
+    /// Post a general comment on a PR (issue comment endpoint).
+    pub async fn post_pr_comment(
+        &self,
+        pr_number: u64,
+        body: &str,
+    ) -> Result<()> {
+        let payload = serde_json::json!({ "body": body });
+        let resp = self
+            .client
+            .post(self.api_url(&format!("/issues/{pr_number}/comments")))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("User-Agent", "hive")
+            .header("Accept", "application/vnd.github+json")
+            .json(&payload)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            tracing::warn!(
+                "Failed to post comment on PR #{pr_number}: {}",
+                resp.status()
+            );
+        }
+        Ok(())
+    }
+
     pub async fn push_branch(
         &self,
         worktree_path: &std::path::Path,

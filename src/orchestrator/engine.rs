@@ -471,6 +471,61 @@ async fn run_bot_reviews(
 
         let fix_result = run_fix_agent(runner, fix_config, issue_id, event_tx, runs_dir).await?;
         total_cost += fix_result.cost_usd;
+
+        // Reply to each comment and post summary on the PR
+        send_and_log(
+            event_tx,
+            runs_dir,
+            issue_id,
+            AgentEvent::TextDelta(
+                "[Bot Reviews] Acknowledging addressed comments on PR...\n".to_string(),
+            ),
+        )
+        .await;
+
+        let mut inline_replied = 0u32;
+        let mut summary_items: Vec<String> = Vec::new();
+
+        for comment in &new_bot_comments {
+            if let Some(numeric_id) = comment.id.strip_prefix("inline-") {
+                if let Ok(cid) = numeric_id.parse::<u64>() {
+                    let _ = github
+                        .reply_to_inline_comment(pr_number, cid, "Addressed in latest push.")
+                        .await;
+                    inline_replied += 1;
+                }
+            } else {
+                // Review body or issue comment — collect for summary
+                let preview: String = comment.body.chars().take(80).collect();
+                summary_items.push(format!(
+                    "- **{}**: {}{}",
+                    comment.author,
+                    preview,
+                    if comment.body.len() > 80 { "..." } else { "" }
+                ));
+            }
+        }
+
+        if !summary_items.is_empty() {
+            let summary = format!(
+                "**Hive** addressed the following review comments:\n\n{}\n\n\
+                 Fixes pushed in latest commit.",
+                summary_items.join("\n")
+            );
+            let _ = github.post_pr_comment(pr_number, &summary).await;
+        }
+
+        send_and_log(
+            event_tx,
+            runs_dir,
+            issue_id,
+            AgentEvent::TextDelta(format!(
+                "[Bot Reviews] Replied to {inline_replied} inline comment(s), \
+                 posted summary for {} review comment(s). Resuming polling...\n",
+                summary_items.len()
+            )),
+        )
+        .await;
     }
 }
 
