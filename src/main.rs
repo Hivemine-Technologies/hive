@@ -12,6 +12,7 @@ mod trackers;
 mod tui;
 
 use clap::Parser;
+use tracing_subscriber::{fmt, layer::SubscriberExt, layer::Layer, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser)]
 #[command(
@@ -40,8 +41,29 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter("hive=info")
+    // Persistent file logging — daily rotation to ~/.config/hive/logs/
+    let log_dir = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".config").join("hive").join("logs"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("logs"));
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("warning: could not create log directory {}: {e}", log_dir.display());
+    }
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "hive.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    tracing_subscriber::registry()
+        .with(
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(EnvFilter::new("hive=info")),
+        )
+        .with(
+            fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false)
+                .with_filter(EnvFilter::new("hive=debug")),
+        )
         .init();
 
     let cli = Cli::parse();

@@ -46,25 +46,6 @@ impl GitHubClient {
         Ok(serde_json::from_str(&text)?)
     }
 
-    async fn post(&self, path: &str, body: &Value) -> Result<Value> {
-        let resp = self
-            .client
-            .post(self.api_url(path))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("User-Agent", "hive")
-            .header("Accept", "application/vnd.github+json")
-            .json(body)
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            return Err(HiveError::Tracker(format!(
-                "GitHub API error ({status}): {text}"
-            )));
-        }
-        Ok(serde_json::from_str(&text)?)
-    }
 
     pub async fn create_pr(&self, branch: &str, title: &str, body: &str) -> Result<PrHandle> {
         let payload = serde_json::json!({
@@ -73,11 +54,50 @@ impl GitHubClient {
             "head": branch,
             "base": "master",
         });
-        let resp = self.post("/pulls", &payload).await?;
+        let resp = self
+            .client
+            .post(self.api_url("/pulls"))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("User-Agent", "hive")
+            .header("Accept", "application/vnd.github+json")
+            .json(&payload)
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+
+        if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY && text.contains("A pull request already exists") {
+            return self.find_existing_pr(branch).await;
+        }
+
+        if !status.is_success() {
+            return Err(HiveError::Tracker(format!(
+                "GitHub API error ({status}): {text}"
+            )));
+        }
+
+        let resp: Value = serde_json::from_str(&text)?;
         Ok(PrHandle {
             number: resp["number"].as_u64().unwrap_or(0),
             url: resp["html_url"].as_str().unwrap_or("").to_string(),
             head_sha: resp["head"]["sha"].as_str().unwrap_or("").to_string(),
+        })
+    }
+
+    async fn find_existing_pr(&self, branch: &str) -> Result<PrHandle> {
+        let resp = self
+            .get(&format!("/pulls?head={}:{}&state=open", self.owner, branch))
+            .await?;
+        let pr = resp
+            .as_array()
+            .and_then(|prs| prs.first())
+            .ok_or_else(|| HiveError::Tracker(format!(
+                "PR already exists for branch '{branch}' but could not be found"
+            )))?;
+        Ok(PrHandle {
+            number: pr["number"].as_u64().unwrap_or(0),
+            url: pr["html_url"].as_str().unwrap_or("").to_string(),
+            head_sha: pr["head"]["sha"].as_str().unwrap_or("").to_string(),
         })
     }
 
@@ -142,7 +162,6 @@ impl GitHubClient {
                 id: c["id"].as_u64().unwrap_or(0),
                 author: c["user"]["login"].as_str().unwrap_or("").to_string(),
                 body: c["body"].as_str().unwrap_or("").to_string(),
-                path: c["path"].as_str().map(String::from),
                 is_bot: c["user"]["type"].as_str() == Some("Bot"),
             })
             .collect();
@@ -180,6 +199,5 @@ pub struct ReviewComment {
     pub id: u64,
     pub author: String,
     pub body: String,
-    pub path: Option<String>,
     pub is_bot: bool,
 }

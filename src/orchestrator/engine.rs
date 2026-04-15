@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -8,9 +9,28 @@ use crate::domain::{AgentEvent, OrchestratorEvent, Phase, PhaseOutcome};
 use crate::error::{HiveError, Result};
 use crate::git::github::{CiStatus, GitHubClient, ReviewComment};
 use crate::runners::{AgentRunner, SessionConfig};
+use crate::state::agent_log;
 use crate::trackers::IssueTracker;
 
 use super::prompts;
+
+/// Send an agent event to the TUI and log it to the agent transcript file.
+/// Logs to disk first so the transcript survives even if the process crashes
+/// before the channel send completes.
+async fn send_and_log(
+    event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
+    issue_id: &str,
+    event: AgentEvent,
+) {
+    agent_log::log_agent_event(runs_dir, issue_id, &event);
+    let _ = event_tx
+        .send(OrchestratorEvent::AgentOutput {
+            issue_id: issue_id.to_string(),
+            event,
+        })
+        .await;
+}
 
 /// Outcome from executing a single phase.
 #[derive(Debug)]
@@ -34,6 +54,7 @@ pub async fn run_agent_phase(
     model: Option<&str>,
     permission_mode: Option<&str>,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
     retry_reason: Option<&str>,
     attempt: u8,
 ) -> Result<PhaseExecutionResult> {
@@ -56,14 +77,13 @@ pub async fn run_agent_phase(
     let session_id = handle.session_id.clone();
 
     // Notify TUI of phase start
-    let _ = event_tx
-        .send(OrchestratorEvent::AgentOutput {
-            issue_id: issue_id.to_string(),
-            event: AgentEvent::TextDelta(format!(
-                "[{phase}] Agent started (session: {session_id})\n"
-            )),
-        })
-        .await;
+    send_and_log(
+        event_tx,
+        runs_dir,
+        issue_id,
+        AgentEvent::TextDelta(format!("[{phase}] Agent started (session: {session_id})\n")),
+    )
+    .await;
 
     // Consume output stream
     let mut stream = runner.output_stream(&handle);
@@ -78,9 +98,6 @@ pub async fn run_agent_phase(
                 total_cost = *cost_usd;
                 completed = true;
             }
-            AgentEvent::CostUpdate(cost) => {
-                total_cost = *cost;
-            }
             AgentEvent::Error(msg) => {
                 error_msg = Some(msg.clone());
             }
@@ -88,12 +105,7 @@ pub async fn run_agent_phase(
         }
 
         // Forward all events to TUI
-        let _ = event_tx
-            .send(OrchestratorEvent::AgentOutput {
-                issue_id: issue_id.to_string(),
-                event,
-            })
-            .await;
+        send_and_log(event_tx, runs_dir, issue_id, event).await;
     }
 
     // Determine outcome
@@ -159,6 +171,7 @@ pub async fn run_polling_phase(
     working_dir: &std::path::Path,
     phase_config: Option<&PhaseConfig>,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
     cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<PhaseExecutionResult> {
     match phase {
@@ -172,6 +185,7 @@ pub async fn run_polling_phase(
                 working_dir,
                 phase_config,
                 event_tx,
+                runs_dir,
                 cancel_token,
             )
             .await
@@ -186,6 +200,7 @@ pub async fn run_polling_phase(
                 working_dir,
                 phase_config,
                 event_tx,
+                runs_dir,
                 cancel_token,
             )
             .await
@@ -206,6 +221,7 @@ async fn run_ci_watch(
     working_dir: &std::path::Path,
     phase_config: Option<&PhaseConfig>,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
     cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<PhaseExecutionResult> {
     let poll_interval =
@@ -231,25 +247,27 @@ async fn run_ci_watch(
             _ = interval.tick() => {}
         }
 
-        let _ = event_tx
-            .send(OrchestratorEvent::AgentOutput {
-                issue_id: issue_id.to_string(),
-                event: AgentEvent::TextDelta(format!(
-                    "[CI Watch] Polling CI status for PR #{pr_number}...\n"
-                )),
-            })
-            .await;
+        send_and_log(
+            event_tx,
+            runs_dir,
+            issue_id,
+            AgentEvent::TextDelta(format!(
+                "[CI Watch] Polling CI status for PR #{pr_number}...\n"
+            )),
+        )
+        .await;
 
         let ci_status = github.poll_ci(pr_number).await?;
 
         match ci_status {
             CiStatus::Passed => {
-                let _ = event_tx
-                    .send(OrchestratorEvent::AgentOutput {
-                        issue_id: issue_id.to_string(),
-                        event: AgentEvent::TextDelta("[CI Watch] CI passed!\n".to_string()),
-                    })
-                    .await;
+                send_and_log(
+                    event_tx,
+                    runs_dir,
+                    issue_id,
+                    AgentEvent::TextDelta("[CI Watch] CI passed!\n".to_string()),
+                )
+                .await;
                 return Ok(PhaseExecutionResult {
                     outcome: PhaseOutcome::Success,
                     cost_usd: total_cost,
@@ -257,14 +275,13 @@ async fn run_ci_watch(
                 });
             }
             CiStatus::Pending => {
-                let _ = event_tx
-                    .send(OrchestratorEvent::AgentOutput {
-                        issue_id: issue_id.to_string(),
-                        event: AgentEvent::TextDelta(
-                            "[CI Watch] CI still pending...\n".to_string(),
-                        ),
-                    })
-                    .await;
+                send_and_log(
+                    event_tx,
+                    runs_dir,
+                    issue_id,
+                    AgentEvent::TextDelta("[CI Watch] CI still pending...\n".to_string()),
+                )
+                .await;
                 continue;
             }
             CiStatus::Failed { failures } => {
@@ -282,14 +299,15 @@ async fn run_ci_watch(
                 }
 
                 fix_attempts += 1;
-                let _ = event_tx
-                    .send(OrchestratorEvent::AgentOutput {
-                        issue_id: issue_id.to_string(),
-                        event: AgentEvent::TextDelta(format!(
-                            "[CI Watch] CI failed. Spawning fix agent (attempt {fix_attempts}/{max_fix_attempts})...\n"
-                        )),
-                    })
-                    .await;
+                send_and_log(
+                    event_tx,
+                    runs_dir,
+                    issue_id,
+                    AgentEvent::TextDelta(format!(
+                        "[CI Watch] CI failed. Spawning fix agent (attempt {fix_attempts}/{max_fix_attempts})...\n"
+                    )),
+                )
+                .await;
 
                 let fix_prompt = prompts::build_ci_fix_prompt(issue_id, &failures);
                 let fix_config = SessionConfig {
@@ -300,19 +318,19 @@ async fn run_ci_watch(
                 };
 
                 let fix_result =
-                    run_fix_agent(runner, fix_config, issue_id, event_tx).await?;
+                    run_fix_agent(runner, fix_config, issue_id, event_tx, runs_dir).await?;
                 total_cost += fix_result.cost_usd;
 
                 // After fix agent completes, push and resume polling
-                let _ = event_tx
-                    .send(OrchestratorEvent::AgentOutput {
-                        issue_id: issue_id.to_string(),
-                        event: AgentEvent::TextDelta(
-                            "[CI Watch] Fix agent completed. Resuming CI polling...\n"
-                                .to_string(),
-                        ),
-                    })
-                    .await;
+                send_and_log(
+                    event_tx,
+                    runs_dir,
+                    issue_id,
+                    AgentEvent::TextDelta(
+                        "[CI Watch] Fix agent completed. Resuming CI polling...\n".to_string(),
+                    ),
+                )
+                .await;
             }
         }
     }
@@ -327,6 +345,7 @@ async fn run_bot_reviews(
     working_dir: &std::path::Path,
     phase_config: Option<&PhaseConfig>,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
     cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<PhaseExecutionResult> {
     let poll_interval =
@@ -358,14 +377,15 @@ async fn run_bot_reviews(
             _ = interval.tick() => {}
         }
 
-        let _ = event_tx
-            .send(OrchestratorEvent::AgentOutput {
-                issue_id: issue_id.to_string(),
-                event: AgentEvent::TextDelta(format!(
-                    "[Bot Reviews] Polling reviews for PR #{pr_number}...\n"
-                )),
-            })
-            .await;
+        send_and_log(
+            event_tx,
+            runs_dir,
+            issue_id,
+            AgentEvent::TextDelta(format!(
+                "[Bot Reviews] Polling reviews for PR #{pr_number}...\n"
+            )),
+        )
+        .await;
 
         let comments = github.poll_reviews(pr_number).await?;
 
@@ -390,15 +410,16 @@ async fn run_bot_reviews(
         if new_bot_comments.is_empty() {
             quiet_polls += 1;
             if quiet_polls >= 2 {
-                let _ = event_tx
-                    .send(OrchestratorEvent::AgentOutput {
-                        issue_id: issue_id.to_string(),
-                        event: AgentEvent::TextDelta(
-                            "[Bot Reviews] No new bot comments after 2 quiet polls. Done.\n"
-                                .to_string(),
-                        ),
-                    })
-                    .await;
+                send_and_log(
+                    event_tx,
+                    runs_dir,
+                    issue_id,
+                    AgentEvent::TextDelta(
+                        "[Bot Reviews] No new bot comments after 2 quiet polls. Done.\n"
+                            .to_string(),
+                    ),
+                )
+                .await;
                 return Ok(PhaseExecutionResult {
                     outcome: PhaseOutcome::Success,
                     cost_usd: total_cost,
@@ -429,15 +450,16 @@ async fn run_bot_reviews(
             .map(|c| format!("[{}] {}", c.author, c.body))
             .collect();
 
-        let _ = event_tx
-            .send(OrchestratorEvent::AgentOutput {
-                issue_id: issue_id.to_string(),
-                event: AgentEvent::TextDelta(format!(
-                    "[Bot Reviews] {} new bot comment(s). Spawning fix agent (cycle {fix_cycles}/{max_fix_cycles})...\n",
-                    new_bot_comments.len()
-                )),
-            })
-            .await;
+        send_and_log(
+            event_tx,
+            runs_dir,
+            issue_id,
+            AgentEvent::TextDelta(format!(
+                "[Bot Reviews] {} new bot comment(s). Spawning fix agent (cycle {fix_cycles}/{max_fix_cycles})...\n",
+                new_bot_comments.len()
+            )),
+        )
+        .await;
 
         let fix_prompt = prompts::build_bot_review_fix_prompt(issue_id, &comment_bodies);
         let fix_config = SessionConfig {
@@ -447,7 +469,7 @@ async fn run_bot_reviews(
             permission_mode: None,
         };
 
-        let fix_result = run_fix_agent(runner, fix_config, issue_id, event_tx).await?;
+        let fix_result = run_fix_agent(runner, fix_config, issue_id, event_tx, runs_dir).await?;
         total_cost += fix_result.cost_usd;
     }
 }
@@ -458,6 +480,7 @@ async fn run_fix_agent(
     config: SessionConfig,
     issue_id: &str,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
 ) -> Result<PhaseExecutionResult> {
     let handle = runner.start_session(config).await?;
     let session_id = handle.session_id.clone();
@@ -471,17 +494,9 @@ async fn run_fix_agent(
             AgentEvent::Complete { cost_usd } => {
                 total_cost = *cost_usd;
             }
-            AgentEvent::CostUpdate(cost) => {
-                total_cost = *cost;
-            }
             _ => {}
         }
-        let _ = event_tx
-            .send(OrchestratorEvent::AgentOutput {
-                issue_id: issue_id.to_string(),
-                event,
-            })
-            .await;
+        send_and_log(event_tx, runs_dir, issue_id, event).await;
     }
 
     Ok(PhaseExecutionResult {
@@ -539,6 +554,7 @@ pub async fn run_direct_phase(
     cost_usd: f64,
     started_at: chrono::DateTime<chrono::Utc>,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
 ) -> Result<DirectPhaseResult> {
     match phase {
         Phase::RaisePr => {
@@ -551,11 +567,12 @@ pub async fn run_direct_phase(
                 working_dir,
                 branch,
                 event_tx,
+                runs_dir,
             )
             .await
         }
         Phase::Handoff => {
-            run_handoff(tracker, issue_id, pr, cost_usd, started_at, event_tx).await
+            run_handoff(tracker, issue_id, pr, cost_usd, started_at, event_tx, runs_dir).await
         }
         _ => Err(HiveError::Phase {
             phase: phase.to_string(),
@@ -573,14 +590,16 @@ async fn run_raise_pr(
     working_dir: &std::path::Path,
     branch: &str,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
 ) -> Result<DirectPhaseResult> {
     // Push the branch
-    let _ = event_tx
-        .send(OrchestratorEvent::AgentOutput {
-            issue_id: issue_id.to_string(),
-            event: AgentEvent::TextDelta(format!("[Raise PR] Pushing branch '{branch}'...\n")),
-        })
-        .await;
+    send_and_log(
+        event_tx,
+        runs_dir,
+        issue_id,
+        AgentEvent::TextDelta(format!("[Raise PR] Pushing branch '{branch}'...\n")),
+    )
+    .await;
 
     github.push_branch(working_dir, branch).await?;
 
@@ -588,24 +607,26 @@ async fn run_raise_pr(
     let title = format!("{issue_id}: {issue_title}");
     let body = format!("## {issue_title}\n\n{issue_description}\n\n---\n*Automated by Hive*");
 
-    let _ = event_tx
-        .send(OrchestratorEvent::AgentOutput {
-            issue_id: issue_id.to_string(),
-            event: AgentEvent::TextDelta("[Raise PR] Creating pull request...\n".to_string()),
-        })
-        .await;
+    send_and_log(
+        event_tx,
+        runs_dir,
+        issue_id,
+        AgentEvent::TextDelta("[Raise PR] Creating pull request...\n".to_string()),
+    )
+    .await;
 
     let pr_handle = github.create_pr(branch, &title, &body).await?;
 
-    let _ = event_tx
-        .send(OrchestratorEvent::AgentOutput {
-            issue_id: issue_id.to_string(),
-            event: AgentEvent::TextDelta(format!(
-                "[Raise PR] PR created: {} (PR #{})\n",
-                pr_handle.url, pr_handle.number
-            )),
-        })
-        .await;
+    send_and_log(
+        event_tx,
+        runs_dir,
+        issue_id,
+        AgentEvent::TextDelta(format!(
+            "[Raise PR] PR created: {} (PR #{})\n",
+            pr_handle.url, pr_handle.number
+        )),
+    )
+    .await;
 
     // Transition issue to "In Review"
     if let Err(e) = tracker.finish_issue(issue_id).await {
@@ -625,6 +646,7 @@ async fn run_handoff(
     cost_usd: f64,
     started_at: chrono::DateTime<chrono::Utc>,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
 ) -> Result<DirectPhaseResult> {
     let duration = chrono::Utc::now()
         .signed_duration_since(started_at)
@@ -634,15 +656,16 @@ async fn run_handoff(
         .map(|p| p.url.clone())
         .unwrap_or_else(|| "N/A".to_string());
 
-    let _ = event_tx
-        .send(OrchestratorEvent::AgentOutput {
-            issue_id: issue_id.to_string(),
-            event: AgentEvent::TextDelta(format!(
-                "[Handoff] Story complete. Cost: ${cost_usd:.2}, Duration: {}m, PR: {pr_url}\n",
-                duration / 60
-            )),
-        })
-        .await;
+    send_and_log(
+        event_tx,
+        runs_dir,
+        issue_id,
+        AgentEvent::TextDelta(format!(
+            "[Handoff] Story complete. Cost: ${cost_usd:.2}, Duration: {}m, PR: {pr_url}\n",
+            duration / 60
+        )),
+    )
+    .await;
 
     // Note: Handoff does NOT transition to "done" status automatically.
     // The PR still needs human review + merge. The story is marked Complete

@@ -1,6 +1,5 @@
 pub mod engine;
 pub mod prompts;
-pub mod retry;
 pub mod transitions;
 
 use std::collections::HashMap;
@@ -118,8 +117,7 @@ impl Orchestrator {
                         TuiCommand::RebaseStory { issue_id } => {
                             self.rebase_story(&issue_id).await?;
                         }
-                        TuiCommand::RefreshStories => {}
-                        TuiCommand::CopyWorktreePath { .. } => {}
+                        TuiCommand::CopyWorktreePath => {}
                     }
                 }
             }
@@ -205,8 +203,6 @@ impl Orchestrator {
             if let Some(ref session_id) = run.session_id {
                 let handle = crate::runners::SessionHandle {
                     session_id: session_id.clone(),
-                    runner_name: self.runner.name().to_string(),
-                    pid: None,
                 };
                 let _ = self.runner.cancel(&handle).await;
             }
@@ -351,6 +347,7 @@ async fn story_phase_loop(
                 model,
                 None,
                 &event_tx,
+                &runs_dir,
                 None,
                 0,
             )
@@ -385,6 +382,7 @@ async fn story_phase_loop(
                         model,
                         None,
                         &event_tx,
+                        &runs_dir,
                         Some(&reason),
                         attempt,
                     )
@@ -433,6 +431,7 @@ async fn story_phase_loop(
                         working_dir,
                         phase_config,
                         &event_tx,
+                        &runs_dir,
                         &cancel_token,
                     )
                     .await?;
@@ -460,6 +459,7 @@ async fn story_phase_loop(
                     run.cost_usd,
                     run.started_at,
                     &event_tx,
+                    &runs_dir,
                 )
                 .await?;
 
