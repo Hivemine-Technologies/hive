@@ -102,34 +102,61 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
         .map(|c| c.tracker_config.statuses.past_review.clone())
         .unwrap_or_default();
 
+    let mut raw_jql: Option<String> = existing
+        .as_ref()
+        .and_then(|c| c.tracker_config.raw_jql.clone());
+
     if tracker == "jira" {
-        println!("\n  Jira-specific settings:");
-        println!("  (for `team` above: put the Jira \"Team\" custom field value, not the project key)\n");
+        println!("\n  Jira-specific settings:\n");
 
-        // Required: Jira project key (the ticket prefix, e.g. "APEX")
-        let default_project_key = fields.get("jira_project").cloned().unwrap_or_default();
-        let project_key = loop {
-            let v = prompt_with_default("Jira project key (e.g. APEX)", &default_project_key)?;
-            if !v.trim().is_empty() {
-                break v.trim().to_string();
-            }
-            println!("  ✗ jira_project is required for Jira — it's the ticket prefix used in JQL.");
-        };
-        fields.insert("jira_project".to_string(), project_key);
-
-        // Optional: override the JQL clause for the Team custom field
-        let default_team_field = fields
-            .get("jira_team_field")
-            .cloned()
-            .unwrap_or_else(|| "Team[Team]".to_string());
-        let team_field = prompt_with_default(
-            "JQL name for Team field (blank = default)",
-            &default_team_field,
+        // Ask whether to use raw JQL or build from fields
+        let default_jql_mode = if raw_jql.is_some() { "raw" } else { "fields" };
+        let jql_mode = prompt_with_default(
+            "JQL mode: provide a raw query or build from fields? (raw/fields)",
+            default_jql_mode,
         )?;
-        if team_field.trim().is_empty() || team_field == "Team[Team]" {
-            fields.remove("jira_team_field");
+
+        if jql_mode.starts_with('r') {
+            let default_raw = raw_jql.as_deref().unwrap_or("");
+            let jql_input = prompt_with_default("Raw JQL query", default_raw)?;
+            if jql_input.trim().is_empty() {
+                println!("  ✗ raw JQL cannot be empty — falling back to field-based setup.");
+                raw_jql = None;
+            } else {
+                raw_jql = Some(jql_input);
+            }
         } else {
-            fields.insert("jira_team_field".to_string(), team_field);
+            raw_jql = None;
+        }
+
+        if raw_jql.is_none() {
+            println!("  (for `team` above: put the Jira \"Team\" custom field value, not the project key)\n");
+
+            // Required: Jira project key (the ticket prefix, e.g. "APEX")
+            let default_project_key = fields.get("jira_project").cloned().unwrap_or_default();
+            let project_key = loop {
+                let v = prompt_with_default("Jira project key (e.g. APEX)", &default_project_key)?;
+                if !v.trim().is_empty() {
+                    break v.trim().to_string();
+                }
+                println!("  ✗ jira_project is required for Jira — it's the ticket prefix used in JQL.");
+            };
+            fields.insert("jira_project".to_string(), project_key);
+
+            // Optional: override the JQL clause for the Team custom field
+            let default_team_field = fields
+                .get("jira_team_field")
+                .cloned()
+                .unwrap_or_else(|| "Team[Team]".to_string());
+            let team_field = prompt_with_default(
+                "JQL name for Team field (blank = default)",
+                &default_team_field,
+            )?;
+            if team_field.trim().is_empty() || team_field == "Team[Team]" {
+                fields.remove("jira_team_field");
+            } else {
+                fields.insert("jira_team_field".to_string(), team_field);
+            }
         }
 
         // Optional: extra "past review" states (comma-separated)
@@ -268,6 +295,7 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
                 past_review,
             },
             fields,
+            raw_jql,
         },
         phases,
         post_worktree_setup,

@@ -46,6 +46,8 @@ pub struct TrackerConfig {
     pub statuses: StatusMappings,
     #[serde(default)]
     pub fields: HashMap<String, String>,
+    #[serde(default)]
+    pub raw_jql: Option<String>,
 }
 
 /// Deserialize either a single string or a vec of strings.

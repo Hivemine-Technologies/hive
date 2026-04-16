@@ -212,26 +212,30 @@ impl JiraTracker {
 #[async_trait]
 impl IssueTracker for JiraTracker {
     async fn list_ready(&self, filters: &IssueFilters) -> Result<Vec<Issue>> {
-        let project_key = self.project_key()?.to_string();
-        let team_field = self.team_field();
-        let team = filters
-            .team
-            .as_deref()
-            .unwrap_or(&self.tracker_config.team);
-        let statuses: &[String] = if filters.statuses.is_empty() {
-            &self.tracker_config.ready_filter
+        let jql = if let Some(ref raw) = self.tracker_config.raw_jql {
+            raw.clone()
         } else {
-            &filters.statuses
-        };
+            let project_key = self.project_key()?.to_string();
+            let team_field = self.team_field();
+            let team = filters
+                .team
+                .as_deref()
+                .unwrap_or(&self.tracker_config.team);
+            let statuses: &[String] = if filters.statuses.is_empty() {
+                &self.tracker_config.ready_filter
+            } else {
+                &filters.statuses
+            };
 
-        let jql = build_jql(
-            &project_key,
-            &team_field,
-            team,
-            statuses,
-            filters.project.as_deref(),
-            &filters.labels,
-        );
+            build_jql(
+                &project_key,
+                &team_field,
+                team,
+                statuses,
+                filters.project.as_deref(),
+                &filters.labels,
+            )
+        };
         tracing::info!(target: "hive::jira", %jql, "Jira list_ready JQL");
 
         let body = json!({
