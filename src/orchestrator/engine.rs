@@ -7,7 +7,7 @@ use crate::config::PhaseConfig;
 use crate::domain::story_run::PrHandle;
 use crate::domain::{AgentEvent, OrchestratorEvent, Phase, PhaseOutcome};
 use crate::error::{HiveError, Result};
-use crate::git::github::{CiStatus, GitHubClient, ReviewComment};
+use crate::git::github::{CiStatus, GitHubClient, PrStatus, ReviewComment};
 use crate::runners::{AgentRunner, SessionConfig};
 use crate::state::agent_log;
 use crate::trackers::IssueTracker;
@@ -169,6 +169,7 @@ pub async fn run_polling_phase(
     issue_id: &str,
     issue_title: &str,
     working_dir: &std::path::Path,
+    default_branch: &str,
     phase_config: Option<&PhaseConfig>,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
     runs_dir: &Path,
@@ -202,6 +203,13 @@ pub async fn run_polling_phase(
                 event_tx,
                 runs_dir,
                 cancel_token,
+            )
+            .await
+        }
+        Phase::PrWatch => {
+            run_pr_watch(
+                github, runner, pr_number, issue_id, issue_title, working_dir,
+                default_branch, phase_config, event_tx, runs_dir, cancel_token,
             )
             .await
         }
@@ -579,6 +587,196 @@ async fn run_bot_reviews(
                     )),
                 )
                 .await;
+            }
+        }
+    }
+}
+
+async fn run_pr_watch(
+    github: &GitHubClient,
+    runner: &dyn AgentRunner,
+    pr_number: u64,
+    issue_id: &str,
+    issue_title: &str,
+    working_dir: &std::path::Path,
+    default_branch: &str,
+    phase_config: Option<&PhaseConfig>,
+    event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
+    cancel_token: &tokio_util::sync::CancellationToken,
+) -> Result<PhaseExecutionResult> {
+    // PrWatch defaults to 5-minute polling (vs 30s for CI phases)
+    let poll_interval = phase_config
+        .and_then(|c| c.poll_interval.as_deref())
+        .map(|s| parse_poll_interval(Some(s)))
+        .unwrap_or(Duration::from_secs(300));
+    let max_rebase_attempts = phase_config
+        .and_then(|c| c.max_fix_attempts)
+        .unwrap_or(3);
+    let fix_model = phase_config.and_then(|c| c.fix_model.as_deref());
+
+    let mut rebase_attempts: u8 = 0;
+    let mut total_cost = 0.0;
+    let mut interval = tokio::time::interval(poll_interval);
+
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Ok(PhaseExecutionResult {
+                    outcome: PhaseOutcome::Failed { reason: "Cancelled".to_string() },
+                    cost_usd: total_cost,
+                    session_id: None,
+                });
+            }
+            _ = interval.tick() => {}
+        }
+
+        send_and_log(
+            event_tx, runs_dir, issue_id,
+            AgentEvent::TextDelta(format!(
+                "[PR Watch] Checking PR #{pr_number} status...\n"
+            )),
+        )
+        .await;
+
+        let pr_status = github.poll_pr_status(pr_number).await?;
+
+        match pr_status {
+            PrStatus::Merged => {
+                send_and_log(
+                    event_tx, runs_dir, issue_id,
+                    AgentEvent::TextDelta(
+                        "[PR Watch] PR merged! Story complete.\n".to_string()
+                    ),
+                )
+                .await;
+                return Ok(PhaseExecutionResult {
+                    outcome: PhaseOutcome::Success,
+                    cost_usd: total_cost,
+                    session_id: None,
+                });
+            }
+            PrStatus::Closed => {
+                send_and_log(
+                    event_tx, runs_dir, issue_id,
+                    AgentEvent::TextDelta(
+                        "[PR Watch] PR closed without merge.\n".to_string()
+                    ),
+                )
+                .await;
+                return Ok(PhaseExecutionResult {
+                    outcome: PhaseOutcome::Success,
+                    cost_usd: total_cost,
+                    session_id: None,
+                });
+            }
+            PrStatus::Conflicts => {
+                if rebase_attempts >= max_rebase_attempts {
+                    return Ok(PhaseExecutionResult {
+                        outcome: PhaseOutcome::NeedsAttention {
+                            reason: format!(
+                                "Rebase attempts exhausted ({rebase_attempts}/{max_rebase_attempts})"
+                            ),
+                        },
+                        cost_usd: total_cost,
+                        session_id: None,
+                    });
+                }
+                rebase_attempts += 1;
+
+                send_and_log(
+                    event_tx, runs_dir, issue_id,
+                    AgentEvent::TextDelta(format!(
+                        "[PR Watch] Merge conflicts detected. \
+                         Rebase attempt {rebase_attempts}/{max_rebase_attempts}...\n"
+                    )),
+                )
+                .await;
+
+                // Try a clean rebase first (no agent cost if no real conflicts in files)
+                let rebase_result = crate::git::worktree::rebase_worktree(
+                    working_dir, default_branch,
+                )?;
+
+                match rebase_result {
+                    crate::git::worktree::RebaseResult::Success => {
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Rebase succeeded cleanly. Force pushing...\n"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                        github.force_push_current_branch(working_dir).await?;
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Force push complete. Resuming watch...\n"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                    }
+                    crate::git::worktree::RebaseResult::Conflicts => {
+                        // Rebase was already aborted by rebase_worktree() — spawn agent
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Conflicts found. Spawning agent to resolve...\n"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+
+                        let fix_prompt = prompts::build_rebase_conflict_prompt(
+                            issue_id, issue_title, default_branch,
+                        );
+                        let fix_config = SessionConfig {
+                            working_dir: working_dir.to_path_buf(),
+                            system_prompt: fix_prompt,
+                            model: fix_model.map(|s| s.to_string()),
+                            permission_mode: None,
+                        };
+
+                        let fix_result = run_fix_agent(
+                            runner, fix_config, issue_id, event_tx, runs_dir,
+                        )
+                        .await?;
+                        total_cost += fix_result.cost_usd;
+
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Agent completed. Force pushing...\n".to_string(),
+                            ),
+                        )
+                        .await;
+                        github.force_push_current_branch(working_dir).await?;
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Force push complete. Resuming watch...\n"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                    }
+                    crate::git::worktree::RebaseResult::Failed => {
+                        return Ok(PhaseExecutionResult {
+                            outcome: PhaseOutcome::NeedsAttention {
+                                reason: "Git fetch failed during rebase (network issue?)"
+                                    .to_string(),
+                            },
+                            cost_usd: total_cost,
+                            session_id: None,
+                        });
+                    }
+                }
+            }
+            PrStatus::Clean => {
+                // PR is clean or mergeability not yet computed — keep watching
+                continue;
             }
         }
     }
