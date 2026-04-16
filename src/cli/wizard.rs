@@ -124,6 +124,9 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
                 raw_jql = None;
             } else {
                 raw_jql = Some(jql_input);
+                // Clear field-based JQL config to avoid confusion
+                fields.remove("jira_project");
+                fields.remove("jira_team_field");
             }
         } else {
             raw_jql = None;
