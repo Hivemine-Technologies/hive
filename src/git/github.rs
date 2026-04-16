@@ -91,6 +91,33 @@ impl GitHubClient {
         })
     }
 
+    pub async fn poll_pr_status(&self, pr_number: u64) -> Result<PrStatus> {
+        let pr = self
+            .octocrab
+            .pulls(&self.owner, &self.repo)
+            .get(pr_number)
+            .await
+            .map_err(|e| HiveError::GitHub(e.to_string()))?;
+
+        // Check merged first — a merged PR also has state=Closed
+        if pr.merged_at.is_some() {
+            return Ok(PrStatus::Merged);
+        }
+
+        // Closed without merge
+        if matches!(pr.state, Some(octocrab::models::IssueState::Closed)) {
+            return Ok(PrStatus::Closed);
+        }
+
+        // Open — check mergeability
+        // GitHub computes mergeable async; None means "not yet computed"
+        // Only trigger rebase when GitHub definitively says false (real conflicts)
+        match pr.mergeable {
+            Some(false) => Ok(PrStatus::Conflicts),
+            _ => Ok(PrStatus::Clean), // Some(true) or None — no action needed
+        }
+    }
+
     pub async fn poll_ci(&self, pr_number: u64) -> Result<CiStatus> {
         let pr = self
             .octocrab
@@ -323,6 +350,25 @@ impl GitHubClient {
         Ok(())
     }
 
+    /// Force-push the current branch from a worktree using --force-with-lease.
+    /// Assumes upstream is already set (via `push -u` during RaisePr).
+    pub async fn force_push_current_branch(
+        &self,
+        worktree_path: &std::path::Path,
+    ) -> Result<()> {
+        let output = std::process::Command::new("git")
+            .args(["push", "--force-with-lease"])
+            .current_dir(worktree_path)
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(HiveError::Git(git2::Error::from_str(&format!(
+                "force push failed: {stderr}"
+            ))));
+        }
+        Ok(())
+    }
+
     /// Reply to an inline review comment on a PR.
     pub async fn reply_to_inline_comment(
         &self,
@@ -384,6 +430,18 @@ pub enum CiStatus {
     Pending,
     Passed,
     Failed { failures: Vec<String> },
+}
+
+#[derive(Debug, PartialEq)]
+pub enum PrStatus {
+    /// PR was merged into the base branch.
+    Merged,
+    /// PR was closed without merging.
+    Closed,
+    /// PR is open and clean (no conflicts), or mergeability not yet computed.
+    Clean,
+    /// PR is open but has merge conflicts (GitHub's mergeable == false).
+    Conflicts,
 }
 
 #[derive(Debug, Clone)]
