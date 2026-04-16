@@ -4,7 +4,7 @@ pub mod widgets;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::DefaultTerminal;
@@ -41,6 +41,9 @@ pub struct Tui {
     stories_state: StoriesState,
     worktrees_state: WorktreesState,
     config_state: ConfigState,
+
+    // Notification toast — (timestamp, message)
+    notifications: Vec<(Instant, String)>,
 }
 
 impl Tui {
@@ -72,7 +75,20 @@ impl Tui {
             stories_state: StoriesState::new(),
             worktrees_state: WorktreesState::new(),
             config_state: ConfigState::new(),
+            notifications: Vec::new(),
         }
+    }
+
+    fn notify(&mut self, msg: impl Into<String>) {
+        self.notifications.push((Instant::now(), msg.into()));
+    }
+
+    /// Return the latest notification if it's less than 10 seconds old.
+    fn active_notification(&self) -> Option<&str> {
+        self.notifications
+            .last()
+            .filter(|(t, _)| t.elapsed() < Duration::from_secs(10))
+            .map(|(_, msg)| msg.as_str())
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -130,7 +146,7 @@ impl Tui {
             }
         }
 
-        widgets::status_bar::render_status_bar(frame, status_area, &self.runs);
+        widgets::status_bar::render_status_bar(frame, status_area, self.active_notification());
 
         // Help overlay
         if self.show_help {
@@ -431,6 +447,7 @@ impl Tui {
                             worktree_dir,
                         ) {
                             tracing::warn!("Failed to delete worktree: {e}");
+                            self.notify(format!("Failed to delete worktree: {e}"));
                         }
                     }
                     self.worktrees_state.confirm_delete = false;
@@ -533,6 +550,7 @@ impl Tui {
             }
             Err(e) => {
                 tracing::warn!("Failed to fetch stories: {e}");
+                self.notify(format!("Failed to fetch stories: {e}"));
                 self.stories_state.loading = false;
             }
         }
@@ -550,6 +568,8 @@ impl Tui {
                     }
                     Err(e) => {
                         tracing::warn!("Failed to fetch story detail for {issue_id}: {e}");
+                        // Note: can't call self.notify() from spawned task,
+                        // but detail fetch failures are non-critical
                     }
                 }
             });
@@ -576,7 +596,10 @@ impl Tui {
                     } => {
                         format!("[tool] {tool}: {input_preview}")
                     }
-                    AgentEvent::Error(msg) => format!("[ERROR] {msg}"),
+                    AgentEvent::Error(msg) => {
+                        self.notify(format!("{issue_id}: {msg}"));
+                        format!("[ERROR] {msg}")
+                    }
                     AgentEvent::Complete { cost_usd } => {
                         format!("[complete] cost: ${cost_usd:.2}")
                     }

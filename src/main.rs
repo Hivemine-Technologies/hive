@@ -52,21 +52,35 @@ async fn main() {
     let file_appender = tracing_appender::rolling::daily(&log_dir, "hive.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
-    tracing_subscriber::registry()
-        .with(
-            fmt::layer()
-                .with_writer(std::io::stderr)
-                .with_filter(EnvFilter::new("hive=info")),
-        )
-        .with(
-            fmt::layer()
-                .with_writer(non_blocking)
-                .with_ansi(false)
-                .with_filter(EnvFilter::new("hive=debug")),
-        )
-        .init();
-
     let cli = Cli::parse();
+    let is_tui = cli.command.is_none();
+
+    if is_tui {
+        // TUI mode: file logging only — stderr would corrupt the terminal
+        tracing_subscriber::registry()
+            .with(
+                fmt::layer()
+                    .with_writer(non_blocking)
+                    .with_ansi(false)
+                    .with_filter(EnvFilter::new("hive=debug")),
+            )
+            .init();
+    } else {
+        // CLI mode: stderr + file logging
+        tracing_subscriber::registry()
+            .with(
+                fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_filter(EnvFilter::new("hive=info")),
+            )
+            .with(
+                fmt::layer()
+                    .with_writer(non_blocking)
+                    .with_ansi(false)
+                    .with_filter(EnvFilter::new("hive=debug")),
+            )
+            .init();
+    }
 
     match cli.command {
         None => {

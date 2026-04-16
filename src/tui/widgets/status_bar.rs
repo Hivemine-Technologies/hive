@@ -65,8 +65,8 @@ pub fn render_tab_bar(frame: &mut Frame, area: Rect, active_tab: &Tab, runs: &[S
     frame.render_widget(tab_bar, area);
 }
 
-pub fn render_status_bar(frame: &mut Frame, area: Rect, _runs: &[StoryRun]) {
-    let hints = Line::from(vec![
+pub fn render_status_bar(frame: &mut Frame, area: Rect, notification: Option<&str>) {
+    let hints = vec![
         Span::styled("q", Style::default().fg(Color::Cyan)),
         Span::raw(" quit  "),
         Span::styled("Tab", Style::default().fg(Color::Cyan)),
@@ -75,8 +75,22 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, _runs: &[StoryRun]) {
         Span::raw(" navigate  "),
         Span::styled("?", Style::default().fg(Color::Cyan)),
         Span::raw(" help"),
-    ]);
+    ];
 
-    let bar = Paragraph::new(hints);
-    frame.render_widget(bar, area);
+    if let Some(msg) = notification {
+        let hints_len: usize = hints.iter().map(|s| s.content.len()).sum();
+        let max_msg = (area.width as usize).saturating_sub(hints_len + 4);
+        let truncated: String = msg.chars().take(max_msg).collect();
+        let mut spans = vec![
+            Span::styled("⚠ ", Style::default().fg(Color::Yellow)),
+            Span::styled(truncated, Style::default().fg(Color::Yellow)),
+        ];
+        let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
+        let padding = (area.width as usize).saturating_sub(left_len + hints_len);
+        spans.push(Span::raw(" ".repeat(padding)));
+        spans.extend(hints);
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    } else {
+        frame.render_widget(Paragraph::new(Line::from(hints)), area);
+    }
 }
