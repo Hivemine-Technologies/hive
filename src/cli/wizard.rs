@@ -191,6 +191,12 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
     let gh_owner = prompt_with_default("GitHub owner", &default_gh_owner)?;
     let gh_repo = prompt_with_default("GitHub repo", &default_gh_repo)?;
 
+    let default_gh_branch = existing
+        .as_ref()
+        .map(|c| c.github.default_branch.clone())
+        .unwrap_or_else(|| "main".to_string());
+    let gh_default_branch = prompt_with_default("Default branch", &default_gh_branch)?;
+
     let default_notifier = existing
         .as_ref()
         .and_then(|c| c.notifier.clone())
@@ -287,6 +293,7 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
         github: GitHubConfig {
             owner: gh_owner,
             repo: gh_repo,
+            default_branch: gh_default_branch,
         },
         tracker_config: TrackerConfig {
             team,

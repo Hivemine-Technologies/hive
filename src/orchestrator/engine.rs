@@ -740,6 +740,7 @@ pub async fn run_direct_phase(
     issue_description: &str,
     working_dir: &std::path::Path,
     branch: &str,
+    default_branch: &str,
     pr: Option<&PrHandle>,
     cost_usd: f64,
     started_at: chrono::DateTime<chrono::Utc>,
@@ -756,6 +757,7 @@ pub async fn run_direct_phase(
                 issue_description,
                 working_dir,
                 branch,
+                default_branch,
                 event_tx,
                 runs_dir,
             )
@@ -783,6 +785,7 @@ async fn run_raise_pr(
     issue_description: &str,
     working_dir: &std::path::Path,
     branch: &str,
+    default_branch: &str,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
     runs_dir: &Path,
 ) -> Result<DirectPhaseResult> {
@@ -809,7 +812,7 @@ async fn run_raise_pr(
     )
     .await;
 
-    let pr_handle = github.create_pr(branch, &title, &body).await?;
+    let pr_handle = github.create_pr(branch, default_branch, &title, &body).await?;
 
     send_and_log(
         event_tx,

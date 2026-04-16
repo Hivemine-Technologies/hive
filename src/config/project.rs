@@ -34,6 +34,12 @@ pub struct NotificationConfig {
 pub struct GitHubConfig {
     pub owner: String,
     pub repo: String,
+    #[serde(default = "default_branch")]
+    pub default_branch: String,
+}
+
+fn default_branch() -> String {
+    "main".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

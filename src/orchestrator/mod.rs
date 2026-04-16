@@ -276,7 +276,7 @@ impl Orchestrator {
     async fn rebase_story(&mut self, issue_id: &str) -> Result<()> {
         if let Some(run) = self.runs.get(issue_id) {
             if let Some(ref wt_path) = run.worktree {
-                let result = crate::git::worktree::rebase_worktree(wt_path)?;
+                let result = crate::git::worktree::rebase_worktree(wt_path, &self.config.github.default_branch)?;
                 tracing::info!("rebase result for {issue_id}: {result:?}");
             }
         }
@@ -492,6 +492,7 @@ async fn story_phase_loop(
                     &issue_detail.description,
                     working_dir,
                     branch,
+                    &config.github.default_branch,
                     run.pr.as_ref(),
                     run.cost_usd,
                     run.started_at,

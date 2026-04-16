@@ -40,11 +40,11 @@ impl GitHubClient {
         Ok(resp)
     }
 
-    pub async fn create_pr(&self, branch: &str, title: &str, body: &str) -> Result<PrHandle> {
+    pub async fn create_pr(&self, branch: &str, base: &str, title: &str, body: &str) -> Result<PrHandle> {
         let result = self
             .octocrab
             .pulls(&self.owner, &self.repo)
-            .create(title, branch, "master")
+            .create(title, branch, base)
             .body(body)
             .send()
             .await;

@@ -91,16 +91,16 @@ pub fn remove_worktree(repo_path: &Path, issue_id: &str, worktree_dir: &Path) ->
     Ok(())
 }
 
-pub fn rebase_worktree(worktree_path: &Path) -> Result<RebaseResult> {
+pub fn rebase_worktree(worktree_path: &Path, default_branch: &str) -> Result<RebaseResult> {
     let fetch = Command::new("git")
-        .args(["fetch", "origin", "master"])
+        .args(["fetch", "origin"])
         .current_dir(worktree_path)
         .output()?;
     if !fetch.status.success() {
         return Ok(RebaseResult::Failed);
     }
     let rebase = Command::new("git")
-        .args(["rebase", "origin/master"])
+        .args(["rebase", &format!("origin/{default_branch}")])
         .current_dir(worktree_path)
         .output()?;
     if rebase.status.success() {
