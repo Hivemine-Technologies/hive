@@ -67,10 +67,10 @@ mod tests {
     }
 
     #[test]
-    fn test_advance_past_handoff_is_complete() {
+    fn test_advance_past_handoff_is_pr_watch() {
         let phases = HashMap::new();
         let next = advance(Phase::Handoff, &phases);
-        assert_eq!(next, Phase::Complete);
+        assert_eq!(next, Phase::PrWatch);
     }
 
     #[test]
@@ -78,7 +78,23 @@ mod tests {
         let mut phases = HashMap::new();
         phases.insert("follow-ups".to_string(), disabled_config());
         phases.insert("handoff".to_string(), disabled_config());
+        phases.insert("pr-watch".to_string(), disabled_config());
         let next = advance(Phase::BotReviews { cycle: 0 }, &phases);
+        assert_eq!(next, Phase::Complete);
+    }
+
+    #[test]
+    fn test_advance_from_pr_watch_to_complete() {
+        let phases = HashMap::new();
+        let next = advance(Phase::PrWatch, &phases);
+        assert_eq!(next, Phase::Complete);
+    }
+
+    #[test]
+    fn test_advance_skips_disabled_pr_watch() {
+        let mut phases = HashMap::new();
+        phases.insert("pr-watch".to_string(), disabled_config());
+        let next = advance(Phase::Handoff, &phases);
         assert_eq!(next, Phase::Complete);
     }
 }
