@@ -1,13 +1,5 @@
 use crate::domain::Phase;
 
-/// Common preamble instructing the agent to read project conventions.
-const CONVENTIONS_PREAMBLE: &str = "\
-Read CLAUDE.md at the repo root before doing anything else. If it references \
-additional convention files (e.g. internal/CLAUDE.md, ui/CLAUDE.md), read those \
-too. These define the tech stack, conventions, test commands, and commit patterns. \
-Follow them as your source of truth — do NOT assume any stack or convention not \
-stated there.";
-
 /// Build the system prompt for an agent phase.
 ///
 /// Each agent phase gets a tailored prompt that references the issue
@@ -21,7 +13,6 @@ pub fn build_phase_prompt(
     match phase {
         Phase::Understand => format!(
             "You are analyzing story {issue_id}: {issue_title}.\n\n\
-             {CONVENTIONS_PREAMBLE}\n\n\
              Issue description:\n{issue_description}\n\n\
              1. Read the issue description and acceptance criteria carefully\n\
              2. Explore the codebase to understand what needs to change — identify affected \
@@ -31,7 +22,6 @@ pub fn build_phase_prompt(
         ),
         Phase::Implement => format!(
             "You are implementing story {issue_id}: {issue_title}.\n\n\
-             {CONVENTIONS_PREAMBLE}\n\n\
              Issue description:\n{issue_description}\n\n\
              1. Follow the plan in PLAN.md\n\
              2. Write tests alongside implementation using the project's test framework \
@@ -39,17 +29,12 @@ pub fn build_phase_prompt(
              3. Use conventional commits: `feat({issue_id}): description` or \
              `fix({issue_id}): description`\n\
              4. One logical change per commit\n\
-             5. Before committing, verify each changed file against the Pre-Commit Quality \
-             Checklist in CLAUDE.md (if one exists). Fix any violations before creating \
-             the commit.\n\
-             6. Run the project's verification command (as defined in CLAUDE.md) — fix all \
-             failures before finishing"
+             5. Run the project's verification command — fix all failures before finishing"
         ),
         Phase::SelfReview { .. } => format!(
             "You are reviewing your own implementation of story {issue_id}: {issue_title}.\n\n\
-             {CONVENTIONS_PREAMBLE}\n\n\
              1. Run `git diff master...HEAD` to see all changes\n\
-             2. Review the diff against CLAUDE.md conventions. Check for:\n\
+             2. Review the diff for:\n\
                 - Logic errors and nil/null risks\n\
                 - Convention violations\n\
                 - Missing tests or inadequate test coverage\n\
@@ -62,7 +47,6 @@ pub fn build_phase_prompt(
         Phase::CrossReview => format!(
             "You are an independent reviewer examining the implementation of story \
              {issue_id}: {issue_title}.\n\n\
-             {CONVENTIONS_PREAMBLE}\n\n\
              You did NOT write this code. Review it critically as a second pair of eyes.\n\n\
              1. Run `git diff master...HEAD` to see all changes\n\
              2. Check for: correctness, convention violations, missing tests, security \
@@ -117,7 +101,6 @@ pub fn build_ci_fix_prompt(
     let failure_text = failures.join("\n- ");
     format!(
         "CI failed for story {issue_id}. Your job is to get CI green.\n\n\
-         {CONVENTIONS_PREAMBLE}\n\n\
          ## Failing Checks\n\
          - {failure_text}\n\n\
          ## Approach\n\
@@ -143,7 +126,6 @@ pub fn build_cross_review_fix_prompt(
 ) -> String {
     format!(
         "You are fixing issues found during cross-review of story {issue_id}: {issue_title}.\n\n\
-         {CONVENTIONS_PREAMBLE}\n\n\
          An independent reviewer examined your implementation and produced the following \
          findings. Fix all must-fix issues. Address suggestions that improve the code. \
          Skip any that are incorrect or not applicable.\n\n\
@@ -165,7 +147,6 @@ pub fn build_bot_review_fix_prompt(
     let comment_text = comments.join("\n---\n");
     format!(
         "You are working on story {issue_id}: {issue_title}.\n\n\
-         {CONVENTIONS_PREAMBLE}\n\n\
          Bot reviewers have left feedback on the pull request. CI is passing — \
          these are code quality and style suggestions, not build failures.\n\n\
          ## Approach\n\
@@ -179,26 +160,35 @@ pub fn build_bot_review_fix_prompt(
     )
 }
 
+/// Build a prompt for an agent to resolve merge conflicts via interactive rebase.
+pub fn build_rebase_conflict_prompt(
+    issue_id: &str,
+    issue_title: &str,
+    default_branch: &str,
+) -> String {
+    format!(
+        "You are resolving merge conflicts for story {issue_id}: {issue_title}.\n\n\
+         The branch has fallen behind origin/{default_branch} and has merge conflicts.\n\n\
+         ## Approach\n\
+         1. Run `git fetch origin` to get the latest changes\n\
+         2. Run `git rebase origin/{default_branch}`\n\
+         3. When conflicts appear, resolve them by understanding the intent of BOTH sides:\n\
+            - YOUR changes (the feature branch) implement the story requirements\n\
+            - THEIR changes (from {default_branch}) may have refactored, renamed, or \
+            restructured code — respect those changes\n\
+            - Merge both intents correctly — don't just pick one side blindly\n\
+         4. After resolving each conflicting file: `git add <file>` then `git rebase --continue`\n\
+         5. Repeat steps 3-4 until the rebase completes successfully\n\
+         6. Run the project's verification command to ensure nothing is broken\n\
+         7. If verification fails, fix the issues and commit: \
+            `fix({issue_id}): resolve rebase conflicts`"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::Phase;
-
-    #[test]
-    fn test_agent_phase_prompts_include_conventions_preamble() {
-        for (phase, desc) in [
-            (Phase::Understand, "Create the service"),
-            (Phase::Implement, "Create the service"),
-            (Phase::SelfReview { attempt: 0 }, ""),
-            (Phase::CrossReview, ""),
-        ] {
-            let prompt = build_phase_prompt(&phase, "X-1", "Title", desc);
-            assert!(
-                prompt.contains("CLAUDE.md"),
-                "{phase} prompt missing CLAUDE.md reference"
-            );
-        }
-    }
 
     #[test]
     fn test_understand_prompt() {
@@ -290,7 +280,6 @@ mod tests {
         );
         assert!(prompt.contains("lint: failure"));
         assert!(prompt.contains("test: 3 failed"));
-        assert!(prompt.contains("CLAUDE.md"));
         assert!(prompt.contains("root cause"));
         assert!(prompt.contains("verification command"));
     }
@@ -305,8 +294,18 @@ mod tests {
         assert!(prompt.contains("Consider using Option"));
         assert!(prompt.contains("APX-245"));
         assert!(prompt.contains("Add NumberSequence"));
-        assert!(prompt.contains("CLAUDE.md"));
         assert!(prompt.contains("must-fix"));
+        assert!(prompt.contains("verification command"));
+    }
+
+    #[test]
+    fn test_rebase_conflict_prompt() {
+        let prompt = build_rebase_conflict_prompt("APX-245", "Add NumberSequence", "main");
+        assert!(prompt.contains("APX-245"));
+        assert!(prompt.contains("Add NumberSequence"));
+        assert!(prompt.contains("origin/main"));
+        assert!(prompt.contains("git rebase"));
+        assert!(prompt.contains("rebase --continue"));
         assert!(prompt.contains("verification command"));
     }
 }
