@@ -23,6 +23,9 @@ pub enum HiveError {
     #[error("agent error: {0}")]
     Agent(String),
 
+    #[error("github error: {0}")]
+    GitHub(String),
+
     #[error("tracker error: {0}")]
     Tracker(String),
 

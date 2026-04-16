@@ -1,3 +1,6 @@
+use octocrab::models::CommentId;
+use octocrab::params::repos::Commitish;
+use octocrab::Octocrab;
 use serde_json::Value;
 
 use crate::domain::story_run::PrHandle;
@@ -6,168 +9,135 @@ use crate::error::{HiveError, Result};
 pub struct GitHubClient {
     owner: String,
     repo: String,
-    client: reqwest::Client,
-    token: String,
+    octocrab: Octocrab,
 }
 
 impl GitHubClient {
-    pub fn new(owner: String, repo: String, token: String) -> Self {
-        Self {
+    pub fn new(owner: String, repo: String, token: String) -> Result<Self> {
+        let octocrab = Octocrab::builder()
+            .personal_token(token)
+            .build()
+            .map_err(|e| HiveError::GitHub(e.to_string()))?;
+        Ok(Self {
             owner,
             repo,
-            client: reqwest::Client::new(),
-            token,
-        }
-    }
-
-    fn api_url(&self, path: &str) -> String {
-        format!(
-            "https://api.github.com/repos/{}/{}{}",
-            self.owner, self.repo, path
-        )
+            octocrab,
+        })
     }
 
     async fn graphql(&self, query: &str) -> Result<Value> {
         let payload = serde_json::json!({ "query": query });
-        let resp = self
-            .client
-            .post("https://api.github.com/graphql")
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("User-Agent", "hive")
-            .json(&payload)
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            return Err(HiveError::Tracker(format!(
-                "GitHub GraphQL error ({status}): {text}"
-            )));
-        }
-        let val: Value = serde_json::from_str(&text)?;
-        if let Some(errors) = val.get("errors") {
-            return Err(HiveError::Tracker(format!(
+        let resp: Value = self
+            .octocrab
+            .graphql(&payload)
+            .await
+            .map_err(|e| HiveError::GitHub(format!("GitHub GraphQL error: {e}")))?;
+        if let Some(errors) = resp.get("errors") {
+            return Err(HiveError::GitHub(format!(
                 "GitHub GraphQL errors: {errors}"
             )));
         }
-        Ok(val)
+        Ok(resp)
     }
-
-    async fn get(&self, path: &str) -> Result<Value> {
-        let resp = self
-            .client
-            .get(self.api_url(path))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("User-Agent", "hive")
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            return Err(HiveError::Tracker(format!(
-                "GitHub API error ({status}): {text}"
-            )));
-        }
-        Ok(serde_json::from_str(&text)?)
-    }
-
 
     pub async fn create_pr(&self, branch: &str, title: &str, body: &str) -> Result<PrHandle> {
-        let payload = serde_json::json!({
-            "title": title,
-            "body": body,
-            "head": branch,
-            "base": "master",
-        });
-        let resp = self
-            .client
-            .post(self.api_url("/pulls"))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("User-Agent", "hive")
-            .header("Accept", "application/vnd.github+json")
-            .json(&payload)
+        let result = self
+            .octocrab
+            .pulls(&self.owner, &self.repo)
+            .create(title, branch, "master")
+            .body(body)
             .send()
-            .await?;
-        let status = resp.status();
-        let text = resp.text().await?;
+            .await;
 
-        if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY && text.contains("A pull request already exists") {
-            return self.find_existing_pr(branch).await;
+        match result {
+            Ok(pr) => Ok(PrHandle {
+                number: pr.number,
+                url: pr.html_url.map(|u| u.to_string()).unwrap_or_default(),
+                head_sha: pr.head.sha,
+            }),
+            Err(ref e) => match e {
+                octocrab::Error::GitHub { source, .. }
+                    if source.status_code.as_u16() == 422
+                        && source.message.contains("A pull request already exists") =>
+                {
+                    self.find_existing_pr(branch).await
+                }
+                _ => Err(HiveError::GitHub(format!("GitHub API error: {e}"))),
+            },
         }
-
-        if !status.is_success() {
-            return Err(HiveError::Tracker(format!(
-                "GitHub API error ({status}): {text}"
-            )));
-        }
-
-        let resp: Value = serde_json::from_str(&text)?;
-        Ok(PrHandle {
-            number: resp["number"].as_u64().unwrap_or(0),
-            url: resp["html_url"].as_str().unwrap_or("").to_string(),
-            head_sha: resp["head"]["sha"].as_str().unwrap_or("").to_string(),
-        })
     }
 
     async fn find_existing_pr(&self, branch: &str) -> Result<PrHandle> {
-        let resp = self
-            .get(&format!("/pulls?head={}:{}&state=open", self.owner, branch))
-            .await?;
-        let pr = resp
-            .as_array()
-            .and_then(|prs| prs.first())
-            .ok_or_else(|| HiveError::Tracker(format!(
+        let page = self
+            .octocrab
+            .pulls(&self.owner, &self.repo)
+            .list()
+            .head(format!("{}:{}", self.owner, branch))
+            .state(octocrab::params::State::Open)
+            .send()
+            .await
+            .map_err(|e| HiveError::GitHub(e.to_string()))?;
+
+        let pr = page.items.first().ok_or_else(|| {
+            HiveError::GitHub(format!(
                 "PR already exists for branch '{branch}' but could not be found"
-            )))?;
+            ))
+        })?;
+
         Ok(PrHandle {
-            number: pr["number"].as_u64().unwrap_or(0),
-            url: pr["html_url"].as_str().unwrap_or("").to_string(),
-            head_sha: pr["head"]["sha"].as_str().unwrap_or("").to_string(),
+            number: pr.number,
+            url: pr.html_url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
+            head_sha: pr.head.sha.clone(),
         })
     }
 
     pub async fn poll_ci(&self, pr_number: u64) -> Result<CiStatus> {
-        let resp = self
-            .get(&format!("/pulls/{pr_number}/commits"))
-            .await?;
-        let head_sha = resp
-            .as_array()
-            .and_then(|c| c.last())
-            .and_then(|c| c["sha"].as_str())
-            .unwrap_or("");
+        let pr = self
+            .octocrab
+            .pulls(&self.owner, &self.repo)
+            .get(pr_number)
+            .await
+            .map_err(|e| HiveError::GitHub(e.to_string()))?;
+
+        let head_sha = &pr.head.sha;
         if head_sha.is_empty() {
             return Ok(CiStatus::Pending);
         }
-        let status_resp = self
-            .get(&format!("/commits/{head_sha}/check-runs"))
-            .await?;
-        let check_runs = status_resp["check_runs"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        if check_runs.is_empty() {
+
+        let check_runs = self
+            .octocrab
+            .checks(&self.owner, &self.repo)
+            .list_check_runs_for_git_ref(Commitish(head_sha.clone()))
+            .send()
+            .await
+            .map_err(|e| HiveError::GitHub(e.to_string()))?;
+
+        if check_runs.check_runs.is_empty() {
             return Ok(CiStatus::Pending);
         }
+
         let all_complete = check_runs
+            .check_runs
             .iter()
-            .all(|r| r["status"].as_str() == Some("completed"));
+            .all(|r| r.completed_at.is_some());
+
         if !all_complete {
             return Ok(CiStatus::Pending);
         }
+
         let any_failed = check_runs
+            .check_runs
             .iter()
-            .any(|r| r["conclusion"].as_str() != Some("success"));
+            .any(|r| r.conclusion.as_deref() != Some("success"));
+
         if any_failed {
             let failures = check_runs
+                .check_runs
                 .iter()
-                .filter(|r| r["conclusion"].as_str() != Some("success"))
+                .filter(|r| r.conclusion.as_deref() != Some("success"))
                 .map(|r| {
-                    format!(
-                        "{}: {}",
-                        r["name"].as_str().unwrap_or("unknown"),
-                        r["conclusion"].as_str().unwrap_or("unknown")
-                    )
+                    let conclusion = r.conclusion.as_deref().unwrap_or("no conclusion");
+                    format!("{}: {conclusion}", r.name)
                 })
                 .collect();
             Ok(CiStatus::Failed { failures })
@@ -180,41 +150,79 @@ impl GitHubClient {
         let mut comments = Vec::new();
 
         // 1. Inline diff comments (line-level annotations)
-        if let Ok(resp) = self.get(&format!("/pulls/{pr_number}/comments")).await {
-            for c in resp.as_array().unwrap_or(&Vec::new()) {
+        if let Ok(page) = self
+            .octocrab
+            .pulls(&self.owner, &self.repo)
+            .list_comments(Some(pr_number))
+            .send()
+            .await
+        {
+            for c in &page.items {
                 comments.push(ReviewComment {
-                    id: format!("inline-{}", c["id"].as_u64().unwrap_or(0)),
-                    author: c["user"]["login"].as_str().unwrap_or("").to_string(),
-                    body: c["body"].as_str().unwrap_or("").to_string(),
-                    is_bot: c["user"]["type"].as_str() == Some("Bot"),
+                    id: format!("inline-{}", c.id.into_inner()),
+                    author: c
+                        .user
+                        .as_ref()
+                        .map(|u| u.login.clone())
+                        .unwrap_or_default(),
+                    body: c.body.clone(),
+                    is_bot: c
+                        .user
+                        .as_ref()
+                        .map(|u| u.r#type == "Bot")
+                        .unwrap_or(false),
                 });
             }
         }
 
         // 2. PR review bodies (top-level reviews from bots like CodeRabbit)
-        if let Ok(resp) = self.get(&format!("/pulls/{pr_number}/reviews")).await {
-            for r in resp.as_array().unwrap_or(&Vec::new()) {
-                let body = r["body"].as_str().unwrap_or("");
+        if let Ok(page) = self
+            .octocrab
+            .pulls(&self.owner, &self.repo)
+            .list_reviews(pr_number)
+            .send()
+            .await
+        {
+            for r in &page.items {
+                let body = r.body.as_deref().unwrap_or("");
                 if body.is_empty() {
                     continue;
                 }
                 comments.push(ReviewComment {
-                    id: format!("review-{}", r["id"].as_u64().unwrap_or(0)),
-                    author: r["user"]["login"].as_str().unwrap_or("").to_string(),
+                    id: format!("review-{}", r.id.into_inner()),
+                    author: r
+                        .user
+                        .as_ref()
+                        .map(|u| u.login.clone())
+                        .unwrap_or_default(),
                     body: body.to_string(),
-                    is_bot: r["user"]["type"].as_str() == Some("Bot"),
+                    is_bot: r
+                        .user
+                        .as_ref()
+                        .map(|u| u.r#type == "Bot")
+                        .unwrap_or(false),
                 });
             }
         }
 
         // 3. Issue comments (general PR comments)
-        if let Ok(resp) = self.get(&format!("/issues/{pr_number}/comments")).await {
-            for c in resp.as_array().unwrap_or(&Vec::new()) {
+        if let Ok(page) = self
+            .octocrab
+            .issues(&self.owner, &self.repo)
+            .list_comments(pr_number)
+            .send()
+            .await
+        {
+            for c in &page.items {
+                let body = c.body.as_deref().unwrap_or("");
+                if body.is_empty() {
+                    continue;
+                }
                 comments.push(ReviewComment {
-                    id: format!("issue-{}", c["id"].as_u64().unwrap_or(0)),
-                    author: c["user"]["login"].as_str().unwrap_or("").to_string(),
-                    body: c["body"].as_str().unwrap_or("").to_string(),
-                    is_bot: c["user"]["type"].as_str() == Some("Bot"),
+                    id: format!("issue-{}", c.id.into_inner()),
+                    author: c.user.login.clone(),
+                    body: body.to_string(),
+                    is_bot: c.user.r#type == "Bot",
                 });
             }
         }
@@ -322,22 +330,14 @@ impl GitHubClient {
         comment_id: u64,
         body: &str,
     ) -> Result<()> {
-        let payload = serde_json::json!({ "body": body });
-        let resp = self
-            .client
-            .post(self.api_url(&format!(
-                "/pulls/{pr_number}/comments/{comment_id}/replies"
-            )))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("User-Agent", "hive")
-            .header("Accept", "application/vnd.github+json")
-            .json(&payload)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
+        if let Err(e) = self
+            .octocrab
+            .pulls(&self.owner, &self.repo)
+            .reply_to_comment(pr_number, CommentId(comment_id), body)
+            .await
+        {
             tracing::warn!(
-                "Failed to reply to inline comment {comment_id} on PR #{pr_number}: {}",
-                resp.status()
+                "Failed to reply to inline comment {comment_id} on PR #{pr_number}: {e}"
             );
         }
         Ok(())
@@ -349,21 +349,13 @@ impl GitHubClient {
         pr_number: u64,
         body: &str,
     ) -> Result<()> {
-        let payload = serde_json::json!({ "body": body });
-        let resp = self
-            .client
-            .post(self.api_url(&format!("/issues/{pr_number}/comments")))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("User-Agent", "hive")
-            .header("Accept", "application/vnd.github+json")
-            .json(&payload)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            tracing::warn!(
-                "Failed to post comment on PR #{pr_number}: {}",
-                resp.status()
-            );
+        if let Err(e) = self
+            .octocrab
+            .issues(&self.owner, &self.repo)
+            .create_comment(pr_number, body)
+            .await
+        {
+            tracing::warn!("Failed to post comment on PR #{pr_number}: {e}");
         }
         Ok(())
     }

@@ -132,7 +132,7 @@ pub async fn run(repo_path: &str) -> Result<()> {
                 project.github.owner.clone(),
                 project.github.repo.clone(),
                 t,
-            ))),
+            )?)),
             None => {
                 eprintln!("⚠ GITHUB_TOKEN (or GH_TOKEN) is not set.");
                 eprintln!("  PR creation, CI polling, and bot review phases will fail.");
