@@ -143,6 +143,22 @@ impl Orchestrator {
             &branch,
         )?;
 
+        // Run post-worktree setup command if configured
+        if let Some(ref cmd) = self.config.post_worktree_setup {
+            tracing::info!("Running post-worktree setup in {}: {cmd}", wt_path.display());
+            let output = std::process::Command::new("sh")
+                .args(["-c", cmd])
+                .current_dir(&wt_path)
+                .output()?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!(
+                    "post_worktree_setup failed for {}: {stderr}",
+                    issue.id
+                );
+            }
+        }
+
         let mut run = StoryRun::new(issue.id.clone(), issue.title.clone());
         run.worktree = Some(wt_path);
         run.branch = Some(branch);

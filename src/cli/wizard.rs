@@ -173,6 +173,21 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
         Some(notifier_choice)
     };
 
+    // Post-worktree setup command (optional)
+    let default_setup = existing
+        .as_ref()
+        .and_then(|c| c.post_worktree_setup.clone())
+        .unwrap_or_default();
+    let setup_input = prompt_with_default(
+        "Post-worktree setup command (blank = none)",
+        &default_setup,
+    )?;
+    let post_worktree_setup = if setup_input.trim().is_empty() {
+        None
+    } else {
+        Some(setup_input)
+    };
+
     // Phase toggles
     let mut phases = std::collections::HashMap::new();
     let phase_names = [
@@ -255,6 +270,7 @@ pub fn run_wizard(existing: Option<ProjectConfig>) -> Result<()> {
             fields,
         },
         phases,
+        post_worktree_setup,
     };
 
     // Write project config

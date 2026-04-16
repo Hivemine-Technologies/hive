@@ -16,6 +16,8 @@ pub struct ProjectConfig {
     pub tracker_config: TrackerConfig,
     #[serde(default)]
     pub phases: HashMap<String, PhaseConfig>,
+    #[serde(default)]
+    pub post_worktree_setup: Option<String>,
 }
 
 fn default_worktree_dir() -> String {
