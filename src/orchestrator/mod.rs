@@ -29,7 +29,8 @@ pub struct Orchestrator {
     config: Arc<ProjectConfig>,
     runs: HashMap<String, StoryRun>,
     runs_dir: PathBuf,
-    runner: Arc<dyn AgentRunner>,
+    runners: HashMap<String, Arc<dyn AgentRunner>>,
+    default_runner: String,
     tracker: Arc<dyn IssueTracker>,
     github: Option<Arc<GitHubClient>>,
     notifier: Option<Arc<dyn Notifier>>,
@@ -42,7 +43,8 @@ impl Orchestrator {
     pub fn new(
         config: ProjectConfig,
         runs_dir: PathBuf,
-        runner: Arc<dyn AgentRunner>,
+        runners: HashMap<String, Arc<dyn AgentRunner>>,
+        default_runner: String,
         tracker: Arc<dyn IssueTracker>,
         github: Option<Arc<GitHubClient>>,
         notifier: Option<Arc<dyn Notifier>>,
@@ -58,7 +60,8 @@ impl Orchestrator {
             config: Arc::new(config),
             runs,
             runs_dir,
-            runner,
+            runners,
+            default_runner,
             tracker,
             github,
             notifier,
@@ -66,6 +69,15 @@ impl Orchestrator {
             command_rx,
             cancel_tokens: HashMap::new(),
         })
+    }
+
+    /// Resolve the runner for a given phase config, falling back to the default.
+    fn resolve_runner(&self, phase_runner: Option<&str>) -> Arc<dyn AgentRunner> {
+        phase_runner
+            .and_then(|name| self.runners.get(name))
+            .or_else(|| self.runners.get(&self.default_runner))
+            .expect("default runner must be configured")
+            .clone()
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -187,7 +199,8 @@ impl Orchestrator {
             .insert(run.issue_id.clone(), token.clone());
 
         let config = self.config.clone();
-        let runner = self.runner.clone();
+        let runners = self.runners.clone();
+        let default_runner = self.default_runner.clone();
         let tracker = self.tracker.clone();
         let github = self.github.clone();
         let notifier = self.notifier.clone();
@@ -196,7 +209,8 @@ impl Orchestrator {
 
         tokio::spawn(async move {
             let result = story_phase_loop(
-                run, config, runner, tracker, github, notifier, event_tx, runs_dir, token,
+                run, config, runners, default_runner, tracker, github, notifier, event_tx,
+                runs_dir, token,
             )
             .await;
             if let Err(e) = result {
@@ -211,13 +225,16 @@ impl Orchestrator {
             token.cancel();
         }
 
+        // Resolve runner before mutable borrow of self.runs
+        let cancel_runner = self.resolve_runner(None);
+
         if let Some(run) = self.runs.get_mut(issue_id) {
             // Also cancel any running agent session
             if let Some(ref session_id) = run.session_id {
                 let handle = crate::runners::SessionHandle {
                     session_id: session_id.clone(),
                 };
-                let _ = self.runner.cancel(&handle).await;
+                let _ = cancel_runner.cancel(&handle).await;
             }
             run.status = RunStatus::Failed;
             run.updated_at = Utc::now();
@@ -281,10 +298,24 @@ impl Orchestrator {
 }
 
 /// The main phase execution loop for a single story, running in its own tokio task.
+/// Resolve the runner for a phase, falling back to the default.
+fn resolve_phase_runner<'a>(
+    runners: &'a HashMap<String, Arc<dyn AgentRunner>>,
+    default_runner: &str,
+    phase_config: Option<&crate::config::PhaseConfig>,
+) -> &'a Arc<dyn AgentRunner> {
+    phase_config
+        .and_then(|c| c.runner.as_deref())
+        .and_then(|name| runners.get(name))
+        .or_else(|| runners.get(default_runner))
+        .expect("default runner must be configured")
+}
+
 async fn story_phase_loop(
     mut run: StoryRun,
     config: Arc<ProjectConfig>,
-    runner: Arc<dyn AgentRunner>,
+    runners: HashMap<String, Arc<dyn AgentRunner>>,
+    default_runner: String,
     tracker: Arc<dyn IssueTracker>,
     github: Option<Arc<GitHubClient>>,
     notifier: Option<Arc<dyn Notifier>>,
@@ -341,7 +372,7 @@ async fn story_phase_loop(
             let (_, model) = engine::resolve_phase_runner_config(&run.phase, phase_config);
 
             let result = run_agent_phase(
-                runner.as_ref(),
+                resolve_phase_runner(&runners, &default_runner, phase_config).as_ref(),
                 &run.phase,
                 &issue_id,
                 &issue_detail.title,
@@ -376,7 +407,7 @@ async fn story_phase_loop(
                     };
                     attempt += 1;
                     let retry_result = run_agent_phase(
-                        runner.as_ref(),
+                        resolve_phase_runner(&runners, &default_runner, phase_config).as_ref(),
                         &run.phase,
                         &issue_id,
                         &issue_detail.title,
@@ -424,7 +455,7 @@ async fn story_phase_loop(
                 let (_, fix_model) =
                     engine::resolve_phase_runner_config(&Phase::Implement, implement_config);
                 let fix_cost = engine::fix_cross_review_findings(
-                    runner.as_ref(),
+                    resolve_phase_runner(&runners, &default_runner, implement_config).as_ref(),
                     &issue_id,
                     &issue_detail.title,
                     working_dir,
@@ -447,7 +478,7 @@ async fn story_phase_loop(
                 } else {
                     let result = run_polling_phase(
                         g.as_ref(),
-                        runner.as_ref(),
+                        resolve_phase_runner(&runners, &default_runner, phase_config).as_ref(),
                         &run.phase,
                         pr_number,
                         &issue_id,
@@ -475,7 +506,7 @@ async fn story_phase_loop(
                     &run.phase,
                     g.as_ref(),
                     tracker.as_ref(),
-                    runner.as_ref(),
+                    resolve_phase_runner(&runners, &default_runner, phase_config).as_ref(),
                     &issue_id,
                     &issue_detail.title,
                     &issue_detail.description,

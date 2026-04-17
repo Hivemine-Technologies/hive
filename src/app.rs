@@ -21,25 +21,31 @@ pub async fn run(repo_path: &str) -> Result<()> {
     let global = load_global_config(&config_dir)?;
     let project = load_project_config(&config_dir, repo_path)?;
 
-    // Resolve the primary runner
-    let runner_name = project
+    // Build all configured runners
+    let mut runners: std::collections::HashMap<String, Arc<dyn AgentRunner>> =
+        std::collections::HashMap::new();
+    for (name, runner_config) in &global.runners {
+        let runner: Arc<dyn AgentRunner> = Arc::new(ClaudeRunner::new(
+            runner_config.command.clone(),
+            runner_config.default_model.clone(),
+            runner_config.permission_mode.clone(),
+        ));
+        runners.insert(name.clone(), runner);
+    }
+
+    // Determine the default runner (first enabled phase's runner, or "claude")
+    let default_runner = project
         .phases
         .values()
         .find(|p| p.enabled && p.runner.is_some())
         .and_then(|p| p.runner.clone())
         .unwrap_or_else(|| "claude".to_string());
 
-    let runner_config = global.runners.get(&runner_name).ok_or_else(|| {
-        HiveError::Config(format!(
-            "runner '{runner_name}' not configured in global config"
-        ))
-    })?;
-
-    let runner: Arc<dyn AgentRunner> = Arc::new(ClaudeRunner::new(
-        runner_config.command.clone(),
-        runner_config.default_model.clone(),
-        runner_config.permission_mode.clone(),
-    ));
+    if !runners.contains_key(&default_runner) {
+        return Err(HiveError::Config(format!(
+            "default runner '{default_runner}' not configured in global config"
+        )));
+    }
 
     // Resolve the tracker
     let tracker_conn = global.trackers.get(&project.tracker).ok_or_else(|| {
@@ -175,7 +181,8 @@ pub async fn run(repo_path: &str) -> Result<()> {
     let mut orchestrator = Orchestrator::new(
         project,
         runs_dir,
-        runner,
+        runners,
+        default_runner,
         tracker,
         github_client,
         notifier,
