@@ -318,8 +318,21 @@ impl GitHub for GitHubClient {
 
         let mut thread_ids = Vec::new();
         for thread in &threads {
-            if thread["isResolved"].as_bool() == Some(true) {
-                continue;
+            match thread["isResolved"].as_bool() {
+                Some(true) => continue,
+                Some(false) => {} // fall through
+                None => {
+                    // Field missing / malformed — likely a GraphQL schema
+                    // change or an unexpected response shape. Surface it so
+                    // we notice, but keep going (resolveReviewThread is
+                    // idempotent, so re-resolving is wasteful not harmful).
+                    tracing::warn!(
+                        "GraphQL review thread missing `isResolved` field \
+                         (schema change?); treating as unresolved. \
+                         thread_id={:?}",
+                        thread["id"].as_str().unwrap_or("<missing>")
+                    );
+                }
             }
             let author = thread["comments"]["nodes"]
                 .as_array()
