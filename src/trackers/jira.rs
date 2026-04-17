@@ -335,8 +335,15 @@ pub fn parse_search_response(v: &Value, base_url: &str) -> Result<Vec<Issue>> {
     let empty = vec![];
     let nodes = v["issues"].as_array().unwrap_or(&empty);
     let mut issues = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        let key = node["key"].as_str().unwrap_or_default().to_string();
+    for (idx, node) in nodes.iter().enumerate() {
+        // `key` is mandatory — it becomes the Issue id used for worktree paths,
+        // branch names, and subsequent API calls. Defaulting to "" makes
+        // downstream failures mysterious; fail here with an actionable error.
+        let key = node["key"].as_str().ok_or_else(|| {
+            HiveError::Tracker(format!(
+                "Jira search response: issue at index {idx} is missing `key` field"
+            ))
+        })?.to_string();
         let fields = &node["fields"];
         let labels: Vec<String> = fields["labels"]
             .as_array()
