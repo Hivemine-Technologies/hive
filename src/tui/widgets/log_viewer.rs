@@ -17,45 +17,6 @@ pub enum ScrollPos {
     Offset(usize),
 }
 
-#[allow(dead_code)] // Task 15 will remove this bridge; keeping new/push for now
-pub struct LogBuffer {
-    lines: Vec<String>,
-    max_lines: usize,
-}
-
-#[allow(dead_code)] // Task 15 removes the bridge; keeping new/push until then
-impl LogBuffer {
-    pub fn new(max_lines: usize) -> Self {
-        Self {
-            lines: Vec::new(),
-            max_lines,
-        }
-    }
-
-    pub fn push(&mut self, line: String) {
-        self.lines.push(line);
-        if self.lines.len() > self.max_lines {
-            self.lines.remove(0);
-        }
-    }
-
-    pub fn lines(&self) -> &[String] {
-        &self.lines
-    }
-
-    pub fn len(&self) -> usize {
-        self.lines.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
-    }
-
-    pub(crate) fn from_lines(lines: Vec<String>, max_lines: usize) -> Self {
-        Self { lines, max_lines }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // EntryBuffer — structured log storage (Task 9+)
 // ---------------------------------------------------------------------------
@@ -103,7 +64,7 @@ impl EntryBuffer {
         &self.entries
     }
 
-    #[allow(dead_code)] // Task 15 will clean up EntryBuffer; keeping until then
+    #[allow(dead_code)] // used in agents.rs tests
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -156,88 +117,6 @@ fn line_style(line: &str) -> Style {
         Style::default()
     }
 }
-
-pub fn render_log(
-    frame: &mut Frame,
-    area: Rect,
-    buffer: &LogBuffer,
-    scroll: ScrollPos,
-    cursor: Option<usize>,
-    title: &str,
-) {
-    if buffer.is_empty() {
-        let empty = Paragraph::new("No output yet.")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title.to_string()),
-            );
-        frame.render_widget(empty, area);
-        return;
-    }
-
-    let visible_height = area.height.saturating_sub(2) as usize; // minus borders
-    let interior_width = area.width.saturating_sub(2); // minus borders
-    let total = buffer.len();
-    let all = buffer.lines();
-
-    // Pick the start source-line index.
-    let start = match scroll {
-        ScrollPos::Tail => start_for_tail(all, visible_height, interior_width),
-        ScrollPos::Offset(n) => n.min(total.saturating_sub(1)),
-    };
-
-    // Consume rendered-row budget forward from `start` to find how many source
-    // lines we include.
-    let mut rows_used = 0;
-    let mut end = start;
-    while end < total && rows_used < visible_height {
-        rows_used += rendered_rows(&all[end], interior_width);
-        end += 1;
-    }
-
-    let lines: Vec<Line> = all[start..end]
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            let line_idx = start + i;
-            let mut style = line_style(line);
-            if cursor == Some(line_idx) {
-                style = style.bg(Color::Rgb(40, 40, 60));
-            }
-            Line::from(Span::styled(line.as_str(), style))
-        })
-        .collect();
-
-    let scroll_indicator = if total <= visible_height && matches!(scroll, ScrollPos::Tail) {
-        String::new()
-    } else {
-        let (line_no, pct) = match scroll {
-            ScrollPos::Tail => (total, 100),
-            ScrollPos::Offset(n) => {
-                let line_no = (n + 1).min(total);
-                let pct = if total <= 1 { 100 } else { (line_no * 100) / total };
-                (line_no, pct)
-            }
-        };
-        format!(" [{line_no}/{total} · {pct}%]")
-    };
-
-    let log = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("{title}{scroll_indicator}")),
-        )
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(log, area);
-}
-
-// ---------------------------------------------------------------------------
-// Bridge helpers: EntryBuffer → flatten → LogBuffer → render_log (Task 15 removes)
-// ---------------------------------------------------------------------------
 
 /// Flatten EntryBuffer to lines with fold awareness.
 /// `is_folded(tool_use_id, default_folded) -> bool` controls whether each tool entry
@@ -302,48 +181,6 @@ where
     out
 }
 
-/// Flatten EntryBuffer to lines for the (still flat) renderer. Phase 3 replaces this.
-#[allow(dead_code)]
-pub fn flatten_entries(buf: &EntryBuffer) -> Vec<String> {
-    let mut out = Vec::new();
-    for entry in buf.entries() {
-        match entry {
-            LogEntry::Text(s) => {
-                for line in s.lines() {
-                    out.push(line.to_string());
-                }
-            }
-            LogEntry::Marker(s) => out.push(format!("[{s}]")),
-            LogEntry::Tool {
-                tool,
-                input,
-                result,
-                ..
-            } => {
-                let preview = if input.chars().count() > 120 {
-                    let safe_end = input
-                        .char_indices()
-                        .nth(120)
-                        .map(|(i, _)| i)
-                        .unwrap_or(input.len());
-                    format!("{}...", &input[..safe_end])
-                } else {
-                    input.clone()
-                };
-                out.push(format!("→ {tool}: {preview}"));
-                if let Some(r) = result {
-                    let status = if r.is_error { "✗" } else { "✓" };
-                    out.push(format!("  {status} ({}ms)", r.duration_ms));
-                    for line in r.output.lines() {
-                        out.push(format!("    {line}"));
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
 /// Walk the rendered line list and return the tool_use_id that owns a
 /// given rendered-line index. The walk must use the same fold predicate
 /// as the current render to produce consistent indices.
@@ -394,43 +231,59 @@ where
         frame.render_widget(empty, area);
         return 0;
     }
-    let lines = flatten_entries_with_fold(buffer, is_folded);
-    let total = lines.len();
-    let temp = LogBuffer::from_lines(lines, 5000);
-    render_log(frame, area, &temp, scroll, cursor, title);
+    let all = flatten_entries_with_fold(buffer, is_folded);
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let interior_width = area.width.saturating_sub(2);
+    let total = all.len();
+
+    let start = match scroll {
+        ScrollPos::Tail => start_for_tail(&all, visible_height, interior_width),
+        ScrollPos::Offset(n) => n.min(total.saturating_sub(1)),
+    };
+    let mut rows_used = 0;
+    let mut end = start;
+    while end < total && rows_used < visible_height {
+        rows_used += rendered_rows(&all[end], interior_width);
+        end += 1;
+    }
+
+    let lines: Vec<Line> = all[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let line_idx = start + i;
+            let mut style = line_style(line);
+            if cursor == Some(line_idx) {
+                style = style.bg(Color::Rgb(40, 40, 60));
+            }
+            Line::from(Span::styled(line.as_str(), style))
+        })
+        .collect();
+
+    let scroll_indicator = if total <= visible_height && matches!(scroll, ScrollPos::Tail) {
+        String::new()
+    } else {
+        let (line_no, pct) = match scroll {
+            ScrollPos::Tail => (total, 100),
+            ScrollPos::Offset(n) => {
+                let line_no = (n + 1).min(total);
+                let pct = if total <= 1 { 100 } else { (line_no * 100) / total };
+                (line_no, pct)
+            }
+        };
+        format!(" [{line_no}/{total} · {pct}%]")
+    };
+
+    let log = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(format!("{title}{scroll_indicator}")))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(log, area);
     total
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_log_buffer_push() {
-        let mut buf = LogBuffer::new(3);
-        buf.push("line 1".to_string());
-        buf.push("line 2".to_string());
-        assert_eq!(buf.len(), 2);
-        assert!(!buf.is_empty());
-    }
-
-    #[test]
-    fn test_log_buffer_max_lines() {
-        let mut buf = LogBuffer::new(2);
-        buf.push("a".to_string());
-        buf.push("b".to_string());
-        buf.push("c".to_string());
-        assert_eq!(buf.len(), 2);
-        assert_eq!(buf.lines()[0], "b");
-        assert_eq!(buf.lines()[1], "c");
-    }
-
-    #[test]
-    fn test_log_buffer_new_empty() {
-        let buf = LogBuffer::new(100);
-        assert!(buf.is_empty());
-        assert_eq!(buf.len(), 0);
-    }
 
     #[test]
     fn test_rendered_rows_short_line() {
