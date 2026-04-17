@@ -114,7 +114,6 @@ impl Orchestrator {
                         TuiCommand::RetryStory { issue_id } => {
                             self.retry_story(&issue_id).await?;
                         }
-                        TuiCommand::RebaseStory { .. } => {}
                         TuiCommand::CopyWorktreePath => {}
                     }
                 }

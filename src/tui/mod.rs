@@ -182,7 +182,6 @@ impl Tui {
                 Line::from(vec![Span::styled("j/k ", Style::default().fg(Color::Yellow)), Span::raw("Navigate agent list")]),
                 Line::from(vec![Span::styled("Tab ", Style::default().fg(Color::Yellow)), Span::raw("Toggle sidebar / log panel focus")]),
                 Line::from(vec![Span::styled("c   ", Style::default().fg(Color::Yellow)), Span::raw("Cancel selected agent")]),
-                Line::from(vec![Span::styled("r   ", Style::default().fg(Color::Yellow)), Span::raw("Rebase selected worktree")]),
                 Line::from(vec![Span::styled("R   ", Style::default().fg(Color::Yellow)), Span::raw("Retry failed/attention agent")]),
                 Line::from(vec![Span::styled("o   ", Style::default().fg(Color::Yellow)), Span::raw("Copy worktree path")]),
                 Line::from(vec![Span::styled("g/G ", Style::default().fg(Color::Yellow)), Span::raw("Scroll log top/bottom")]),
@@ -202,7 +201,6 @@ impl Tui {
                 Line::from(""),
                 Line::from(vec![Span::styled("j/k ", Style::default().fg(Color::Yellow)), Span::raw("Navigate worktrees")]),
                 Line::from(vec![Span::styled("r   ", Style::default().fg(Color::Yellow)), Span::raw("Refresh worktree list")]),
-                Line::from(vec![Span::styled("R   ", Style::default().fg(Color::Yellow)), Span::raw("Rebase selected worktree")]),
                 Line::from(vec![Span::styled("d   ", Style::default().fg(Color::Yellow)), Span::raw("Delete selected worktree (y to confirm)")]),
                 Line::from(vec![Span::styled("o   ", Style::default().fg(Color::Yellow)), Span::raw("Copy worktree path")]),
             ],
@@ -312,14 +310,6 @@ impl Tui {
                         let _ = self
                             .command_tx
                             .send(TuiCommand::CancelStory { issue_id: id })
-                            .await;
-                    }
-                }
-                KeyCode::Char('r') => {
-                    if let Some(id) = selected_issue_id {
-                        let _ = self
-                            .command_tx
-                            .send(TuiCommand::RebaseStory { issue_id: id })
                             .await;
                     }
                 }
@@ -463,24 +453,6 @@ impl Tui {
         match code {
             KeyCode::Char('j') | KeyCode::Down => self.worktrees_state.move_down(),
             KeyCode::Char('k') | KeyCode::Up => self.worktrees_state.move_up(),
-            KeyCode::Char('R') => {
-                // Rebase selected worktree
-                if let Some(wt) = self.worktrees_state.selected_worktree() {
-                    if let Some(ref branch) = wt.branch {
-                        for run in &self.runs {
-                            if run.branch.as_deref() == Some(branch) {
-                                let _ = self
-                                    .command_tx
-                                    .send(TuiCommand::RebaseStory {
-                                        issue_id: run.issue_id.clone(),
-                                    })
-                                    .await;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
             KeyCode::Char('r') => {
                 // Refresh worktree list
                 self.worktrees_state.refresh(&self.repo_path);

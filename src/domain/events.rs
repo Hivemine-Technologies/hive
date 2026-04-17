@@ -21,7 +21,6 @@ pub enum TuiCommand {
     StartStory { issue: Issue },
     CancelStory { issue_id: String },
     RetryStory { issue_id: String },
-    RebaseStory { issue_id: String },
     CopyWorktreePath,
     Quit,
 }

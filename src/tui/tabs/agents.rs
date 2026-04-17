@@ -235,8 +235,6 @@ pub fn render(
             Span::raw(" top/bottom  "),
             Span::styled("c", Style::default().fg(Color::Cyan)),
             Span::raw(" cancel  "),
-            Span::styled("r", Style::default().fg(Color::Cyan)),
-            Span::raw(" rebase  "),
             Span::styled("o", Style::default().fg(Color::Cyan)),
             Span::raw(" copy path"),
         ]);
