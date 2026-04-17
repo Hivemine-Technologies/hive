@@ -212,6 +212,14 @@ impl Orchestrator {
         let runs_dir = self.runs_dir.clone();
         let git_ops = self.git_ops.clone();
 
+        // Clones for the error-recovery path. If story_phase_loop returns Err,
+        // we must surface the failure: flip status, persist, emit to the TUI,
+        // and notify — otherwise the run zombies as "Running" forever.
+        let issue_id = run.issue_id.clone();
+        let recovery_event_tx = self.event_tx.clone();
+        let recovery_runs_dir = self.runs_dir.clone();
+        let recovery_notifier = self.notifier.clone();
+
         tokio::spawn(async move {
             let result = story_phase_loop(
                 run, config, runners, default_runner, tracker, github, notifier, event_tx,
@@ -219,7 +227,38 @@ impl Orchestrator {
             )
             .await;
             if let Err(e) = result {
-                tracing::error!("Story task error: {e}");
+                let reason = format!("{e}");
+                tracing::error!("Story task {issue_id} crashed: {reason}");
+
+                // Reload from disk so we pick up whatever state the phase
+                // loop managed to persist before it errored, then flip to
+                // NeedsAttention with the error as the reason.
+                if let Ok(runs) = persistence::load_all_runs(&recovery_runs_dir)
+                    && let Some(mut run) = runs.into_iter().find(|r| r.issue_id == issue_id)
+                {
+                    run.status = RunStatus::NeedsAttention;
+                    run.phase = Phase::NeedsAttention {
+                        reason: reason.clone(),
+                    };
+                    run.updated_at = Utc::now();
+                    if let Err(save_err) = persistence::save_run(&recovery_runs_dir, &run) {
+                        tracing::error!(
+                            "Failed to persist crashed-run state for {issue_id}: {save_err}"
+                        );
+                    }
+                    let _ = recovery_event_tx
+                        .send(OrchestratorEvent::StoryUpdated(run))
+                        .await;
+                }
+
+                send_notification_if_configured(
+                    &recovery_notifier,
+                    NotifyEvent::NeedsAttention {
+                        issue_id: issue_id.clone(),
+                        reason,
+                    },
+                )
+                .await;
             }
         });
     }
