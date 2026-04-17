@@ -75,6 +75,7 @@ TUI mode logs only to file (`~/.config/hive/logs/hive.log`, daily rotation) to a
 ## Conventions
 
 - Error handling uses `thiserror` via `HiveError` enum in `src/error.rs`. All fallible functions return `Result<T>` (aliased to `std::result::Result<T, HiveError>`).
+- **Never silently swallow `Result` in a function that returns `Result`.** The antipattern `if let Err(e) = foo().await { tracing::warn!(...) } Ok(())` is banned: the signature promises callers they'll learn about failures, but the body lies by always returning `Ok(())`. This bit us on PR thread resolution — the TUI reported "Resolved N thread(s)" when N actually failed, masking a token-scope problem and causing PrWatch→BotReviews regression loops. If a function returns `Result<()>`, either propagate the error with `?` (or `map_err` + `?`) or change the signature to infallible. If the caller genuinely wants to log-and-continue, that decision lives at the call site — not hidden in the impl.
 - Async runtime is tokio with `features = ["full"]`. Each story runs in its own spawned task with a `CancellationToken` for clean shutdown.
 - Agent prompts reference "the project's verification command" generically rather than hardcoding build commands.
 - Commit messages in agent prompts use conventional format: `feat(<issue_id>): description` or `fix(<issue_id>): description`.

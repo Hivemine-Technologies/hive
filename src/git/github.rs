@@ -344,8 +344,15 @@ impl GitHub for GitHubClient {
               }}
             }}"#
         );
-        if let Err(e) = self.graphql(&query).await {
-            tracing::warn!("Failed to resolve review thread {thread_id}: {e}");
+        let resp = self.graphql(&query).await?;
+        let is_resolved = resp["data"]["resolveReviewThread"]["thread"]["isResolved"]
+            .as_bool()
+            .unwrap_or(false);
+        if !is_resolved {
+            return Err(HiveError::GitHub(format!(
+                "resolveReviewThread for {thread_id} did not mark thread resolved \
+                 (likely missing pull_requests:write scope); response: {resp}"
+            )));
         }
         Ok(())
     }
@@ -395,16 +402,15 @@ impl GitHub for GitHubClient {
         comment_id: u64,
         body: &str,
     ) -> Result<()> {
-        if let Err(e) = self
-            .octocrab
+        self.octocrab
             .pulls(&self.owner, &self.repo)
             .reply_to_comment(pr_number, CommentId(comment_id), body)
             .await
-        {
-            tracing::warn!(
-                "Failed to reply to inline comment {comment_id} on PR #{pr_number}: {e}"
-            );
-        }
+            .map_err(|e| {
+                HiveError::GitHub(format!(
+                    "Failed to reply to inline comment {comment_id} on PR #{pr_number}: {e}"
+                ))
+            })?;
         Ok(())
     }
 
@@ -414,14 +420,15 @@ impl GitHub for GitHubClient {
         pr_number: u64,
         body: &str,
     ) -> Result<()> {
-        if let Err(e) = self
-            .octocrab
+        self.octocrab
             .issues(&self.owner, &self.repo)
             .create_comment(pr_number, body)
             .await
-        {
-            tracing::warn!("Failed to post comment on PR #{pr_number}: {e}");
-        }
+            .map_err(|e| {
+                HiveError::GitHub(format!(
+                    "Failed to post comment on PR #{pr_number}: {e}"
+                ))
+            })?;
         Ok(())
     }
 

@@ -525,10 +525,15 @@ async fn run_bot_reviews(
         for comment in &new_bot_comments {
             if let Some(numeric_id) = comment.id.strip_prefix("inline-") {
                 if let Ok(cid) = numeric_id.parse::<u64>() {
-                    let _ = github
+                    match github
                         .reply_to_inline_comment(pr_number, cid, "Addressed in latest push.")
-                        .await;
-                    inline_replied += 1;
+                        .await
+                    {
+                        Ok(()) => inline_replied += 1,
+                        Err(e) => tracing::warn!(
+                            "Failed to reply to inline comment {cid} on PR #{pr_number}: {e}"
+                        ),
+                    }
                 }
             } else {
                 // Review body or issue comment — collect for summary
@@ -548,7 +553,11 @@ async fn run_bot_reviews(
                  Fixes pushed in latest commit.",
                 summary_items.join("\n")
             );
-            let _ = github.post_pr_comment(pr_number, &summary).await;
+            if let Err(e) = github.post_pr_comment(pr_number, &summary).await {
+                tracing::warn!(
+                    "Failed to post bot-review summary on PR #{pr_number}: {e}"
+                );
+            }
         }
 
         // Resolve review threads via GraphQL
