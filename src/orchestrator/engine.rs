@@ -778,14 +778,16 @@ async fn run_pr_watch(
                         .await;
                     }
                     crate::git::worktree::RebaseResult::Failed => {
-                        return Ok(PhaseExecutionResult {
-                            outcome: PhaseOutcome::NeedsAttention {
-                                reason: "Git fetch failed during rebase (network issue?)"
+                        // Fetch failure is likely transient (network blip) —
+                        // don't escalate immediately, just log and retry on next poll
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Git fetch failed (network issue?). Will retry on next poll...\n"
                                     .to_string(),
-                            },
-                            cost_usd: total_cost,
-                            session_id: None,
-                        });
+                            ),
+                        )
+                        .await;
                     }
                 }
             }
