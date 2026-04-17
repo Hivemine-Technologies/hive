@@ -44,7 +44,7 @@ pub fn render_log(
     frame: &mut Frame,
     area: Rect,
     buffer: &LogBuffer,
-    scroll: usize,
+    scroll: crate::tui::tabs::agents::ScrollPos,
     title: &str,
 ) {
     if buffer.is_empty() {
@@ -62,11 +62,9 @@ pub fn render_log(
     let visible_height = area.height.saturating_sub(2) as usize; // subtract borders
     let total = buffer.len();
 
-    // Calculate the scroll offset - if scroll is 0, show the latest (tail)
-    let start = if scroll == 0 {
-        total.saturating_sub(visible_height)
-    } else {
-        scroll.min(total.saturating_sub(visible_height))
+    let start = match scroll {
+        crate::tui::tabs::agents::ScrollPos::Tail => total.saturating_sub(visible_height),
+        crate::tui::tabs::agents::ScrollPos::Offset(n) => n.min(total.saturating_sub(visible_height)),
     };
 
     let end = (start + visible_height).min(total);

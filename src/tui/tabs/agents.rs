@@ -17,11 +17,20 @@ pub enum AgentFocus {
     LogPanel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrollPos {
+    /// Follow the tail — always show the newest content.
+    #[default]
+    Tail,
+    /// Manual scroll, value is a source-line index used as the render start.
+    Offset(usize),
+}
+
 pub struct AgentsState {
     pub selected: usize,
     pub focus: AgentFocus,
     pub log_buffers: HashMap<String, log_viewer::LogBuffer>,
-    pub log_scroll: HashMap<String, usize>,
+    pub log_scroll: HashMap<String, ScrollPos>,
 }
 
 impl AgentsState {
@@ -40,7 +49,7 @@ impl AgentsState {
             .or_insert_with(|| log_viewer::LogBuffer::new(5000));
         self.log_scroll
             .entry(issue_id.to_string())
-            .or_insert(0);
+            .or_default();
     }
 
     pub fn append_log(&mut self, issue_id: &str, line: String) {
@@ -58,36 +67,43 @@ impl AgentsState {
     }
 
     pub fn scroll_log_down(&mut self, issue_id: &str) {
-        if let Some(scroll) = self.log_scroll.get_mut(issue_id)
-            && let Some(buf) = self.log_buffers.get(issue_id)
-            && *scroll > 0 {
-            *scroll = (*scroll + 1).min(buf.len().saturating_sub(1));
-        }
-    }
-
-    pub fn scroll_log_up(&mut self, issue_id: &str) {
-        if let Some(scroll) = self.log_scroll.get_mut(issue_id) {
-            if *scroll > 0 {
-                *scroll -= 1;
+        let Some(pos) = self.log_scroll.get_mut(issue_id) else { return };
+        let Some(buf) = self.log_buffers.get(issue_id) else { return };
+        if let ScrollPos::Offset(n) = *pos {
+            let next = n + 1;
+            // Snap to Tail if we've caught up — better than "stuck one line below tail".
+            if next + 1 >= buf.len() {
+                *pos = ScrollPos::Tail;
             } else {
-                // Switch from follow mode to manual scroll
-                if let Some(buf) = self.log_buffers.get(issue_id)
-                    && buf.len() > 1 {
-                    *scroll = buf.len().saturating_sub(2);
-                }
+                *pos = ScrollPos::Offset(next);
             }
         }
     }
 
+    pub fn scroll_log_up(&mut self, issue_id: &str) {
+        let Some(pos) = self.log_scroll.get_mut(issue_id) else { return };
+        let Some(buf) = self.log_buffers.get(issue_id) else { return };
+        match *pos {
+            ScrollPos::Tail => {
+                // Break out of follow mode at the penultimate line.
+                if buf.len() > 1 {
+                    *pos = ScrollPos::Offset(buf.len() - 2);
+                }
+            }
+            ScrollPos::Offset(0) => { /* already at top */ }
+            ScrollPos::Offset(n) => *pos = ScrollPos::Offset(n - 1),
+        }
+    }
+
     pub fn scroll_to_top(&mut self, issue_id: &str) {
-        if let Some(scroll) = self.log_scroll.get_mut(issue_id) {
-            *scroll = 1; // non-zero means manual scroll mode, start from top
+        if let Some(pos) = self.log_scroll.get_mut(issue_id) {
+            *pos = ScrollPos::Offset(0);
         }
     }
 
     pub fn scroll_to_bottom(&mut self, issue_id: &str) {
-        if let Some(scroll) = self.log_scroll.get_mut(issue_id) {
-            *scroll = 0; // 0 means follow mode (tail)
+        if let Some(pos) = self.log_scroll.get_mut(issue_id) {
+            *pos = ScrollPos::Tail;
         }
     }
 }
@@ -209,7 +225,7 @@ pub fn render(
             .log_scroll
             .get(&run.issue_id)
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(ScrollPos::Tail);
 
         if let Some(buffer) = state.log_buffers.get(&run.issue_id) {
             log_viewer::render_log(frame, log_area, buffer, scroll, "Output");
@@ -290,8 +306,34 @@ mod tests {
             state.append_log("APX-1", format!("line {i}"));
         }
         state.scroll_to_top("APX-1");
-        assert_eq!(state.log_scroll["APX-1"], 1);
+        assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(0));
         state.scroll_to_bottom("APX-1");
-        assert_eq!(state.log_scroll["APX-1"], 0);
+        assert_eq!(state.log_scroll["APX-1"], ScrollPos::Tail);
+    }
+
+    #[test]
+    fn test_scroll_down_snaps_to_tail_at_end() {
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        for i in 0..10 {
+            state.append_log("APX-1", format!("line {i}"));
+        }
+        // Move into manual mode one step from the bottom.
+        state.log_scroll.insert("APX-1".to_string(), ScrollPos::Offset(8));
+        state.scroll_log_down("APX-1");
+        // `next + 1 >= buf.len()` is true at Offset(9) so we snap back to Tail.
+        assert_eq!(state.log_scroll["APX-1"], ScrollPos::Tail);
+    }
+
+    #[test]
+    fn test_scroll_up_from_tail_enters_manual() {
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        for i in 0..5 {
+            state.append_log("APX-1", format!("line {i}"));
+        }
+        assert_eq!(state.log_scroll["APX-1"], ScrollPos::Tail);
+        state.scroll_log_up("APX-1");
+        assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(3));
     }
 }
