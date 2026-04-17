@@ -1225,6 +1225,7 @@ mod tests {
     use crate::domain::story_run::PrHandle;
     use crate::git::github::{CiStatus, PrStatus};
     use crate::git::mock_github::{MockGitHub, MockGitOps};
+    use crate::git::worktree::RebaseResult;
     use crate::runners::{AgentRunner, SessionConfig, SessionHandle};
     use crate::trackers::IssueTracker;
 
@@ -1478,8 +1479,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pr_watch_conflicts_triggers_force_push() {
-        // rebase_worktree will fail (no real git repo) → RebaseResult::Failed
-        // → logs and continues. Next poll returns Merged → Success.
+        // MockGitOps returns RebaseResult::Success → clean rebase → force push
         let github = MockGitHub::new();
         {
             let mut q = github.pr_status_responses.lock().unwrap();
@@ -1817,5 +1817,257 @@ mod tests {
     #[test]
     fn test_parse_poll_interval_invalid() {
         assert_eq!(parse_poll_interval(Some("abc")), Duration::from_secs(30));
+    }
+
+    // -----------------------------------------------------------------------
+    // PrWatch negative / edge case tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_pr_watch_rebase_attempts_exhausted() {
+        // 3 consecutive Conflicts with Failed rebases → counter increments
+        // without resetting → exhaustion → NeedsAttention
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Conflicts); // attempt 1: 0<3, rebase fails
+            q.push_back(PrStatus::Conflicts); // attempt 2: 1<3, rebase fails
+            q.push_back(PrStatus::Conflicts); // attempt 3: 2<3, rebase fails
+            q.push_back(PrStatus::Conflicts); // attempt 4: 3>=3 → exhausted
+        }
+
+        // Rebase fails (fetch failure) so counter increments without resetting
+        let git_ops = MockGitOps::new();
+        {
+            let mut q = git_ops.rebase_responses.lock().unwrap();
+            q.push_back(RebaseResult::Failed);
+            q.push_back(RebaseResult::Failed);
+            q.push_back(RebaseResult::Failed);
+        }
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-EXHAUST",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &git_ops,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::NeedsAttention { .. }),
+            "expected NeedsAttention after exhausted rebase attempts, got {:?}",
+            result.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_rebase_conflicts_spawns_agent() {
+        // Rebase returns Conflicts → agent spawned → force push
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Conflicts);
+            q.push_back(PrStatus::Merged);
+        }
+
+        let runner = MockRunner::new();
+        // Queue a session for the rebase conflict agent
+        runner.push_session_events(vec![AgentEvent::Complete { cost_usd: 1.0 }]);
+
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        // MockGitOps returns Conflicts (not Success) → agent path
+        let git_ops = MockGitOps::new();
+        git_ops
+            .rebase_responses
+            .lock()
+            .unwrap()
+            .push_back(RebaseResult::Conflicts);
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-AGENT",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &git_ops,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+        // Agent succeeded → force push happened
+        assert_eq!(*github.force_push_count.lock().unwrap(), 1);
+        // Cost should include the agent session
+        assert!(result.cost_usd > 0.0, "expected agent cost tracked");
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_fetch_failure_retries() {
+        // Fetch fails (RebaseResult::Failed) → logs and continues → next poll clean → merged
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Conflicts);
+            q.push_back(PrStatus::Merged);
+        }
+
+        let git_ops = MockGitOps::new();
+        git_ops
+            .rebase_responses
+            .lock()
+            .unwrap()
+            .push_back(RebaseResult::Failed);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-FETCH-FAIL",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &git_ops,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success after fetch failure + merged, got {:?}",
+            result.outcome
+        );
+        // Fetch failed → no force push on first poll, then merged on second
+        assert_eq!(*github.force_push_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_cancellation() {
+        // Cancel immediately → should return Failed with "Cancelled"
+        let github = MockGitHub::new();
+        // Queue Clean responses — but cancel fires before they're consumed
+        github
+            .pr_status_responses
+            .lock()
+            .unwrap()
+            .push_back(PrStatus::Clean);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // Cancel immediately
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-CANCEL",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &MockGitOps::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Failed { ref reason } if reason.contains("Cancelled")),
+            "expected Failed(Cancelled), got {:?}",
+            result.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ci_watch_exhausts_fix_attempts() {
+        // CI fails 4 times → max_fix_attempts (3) exhausted → NeedsAttention
+        let github = MockGitHub::new();
+        {
+            let mut q = github.ci_status_responses.lock().unwrap();
+            q.push_back(CiStatus::Failed { failures: vec!["lint".into()] });
+            q.push_back(CiStatus::Failed { failures: vec!["lint".into()] });
+            q.push_back(CiStatus::Failed { failures: vec!["lint".into()] });
+            q.push_back(CiStatus::Failed { failures: vec!["lint".into()] });
+        }
+
+        let runner = MockRunner::new();
+        // Queue 3 fix agent sessions
+        runner.push_session_events(vec![AgentEvent::Complete { cost_usd: 0.0 }]);
+        runner.push_session_events(vec![AgentEvent::Complete { cost_usd: 0.0 }]);
+        runner.push_session_events(vec![AgentEvent::Complete { cost_usd: 0.0 }]);
+
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_ci_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-CI-EXHAUST",
+            "Test Issue",
+            working_dir.path(),
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::NeedsAttention { .. }),
+            "expected NeedsAttention after exhausted CI fix attempts, got {:?}",
+            result.outcome
+        );
     }
 }
