@@ -16,7 +16,7 @@ use crate::domain::{
     TuiCommand,
 };
 use crate::error::Result;
-use crate::git::github::GitHubClient;
+use crate::git::github::GitHub;
 use crate::notifiers::Notifier;
 use crate::runners::AgentRunner;
 use crate::state::persistence;
@@ -32,7 +32,7 @@ pub struct Orchestrator {
     runners: HashMap<String, Arc<dyn AgentRunner>>,
     default_runner: String,
     tracker: Arc<dyn IssueTracker>,
-    github: Option<Arc<GitHubClient>>,
+    github: Option<Arc<dyn GitHub>>,
     notifier: Option<Arc<dyn Notifier>>,
     event_tx: mpsc::Sender<OrchestratorEvent>,
     command_rx: mpsc::Receiver<TuiCommand>,
@@ -46,7 +46,7 @@ impl Orchestrator {
         runners: HashMap<String, Arc<dyn AgentRunner>>,
         default_runner: String,
         tracker: Arc<dyn IssueTracker>,
-        github: Option<Arc<GitHubClient>>,
+        github: Option<Arc<dyn GitHub>>,
         notifier: Option<Arc<dyn Notifier>>,
         event_tx: mpsc::Sender<OrchestratorEvent>,
         command_rx: mpsc::Receiver<TuiCommand>,
@@ -317,7 +317,7 @@ async fn story_phase_loop(
     runners: HashMap<String, Arc<dyn AgentRunner>>,
     default_runner: String,
     tracker: Arc<dyn IssueTracker>,
-    github: Option<Arc<GitHubClient>>,
+    github: Option<Arc<dyn GitHub>>,
     notifier: Option<Arc<dyn Notifier>>,
     event_tx: mpsc::Sender<OrchestratorEvent>,
     runs_dir: PathBuf,

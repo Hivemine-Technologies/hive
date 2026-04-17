@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use octocrab::models::CommentId;
 use octocrab::params::repos::Commitish;
 use octocrab::Octocrab;
@@ -5,6 +6,21 @@ use serde_json::Value;
 
 use crate::domain::story_run::PrHandle;
 use crate::error::{HiveError, Result};
+
+#[async_trait]
+pub trait GitHub: Send + Sync {
+    async fn create_pr(&self, branch: &str, base: &str, title: &str, body: &str) -> Result<PrHandle>;
+    async fn poll_ci(&self, pr_number: u64) -> Result<CiStatus>;
+    async fn poll_pr_status(&self, pr_number: u64) -> Result<PrStatus>;
+    async fn poll_reviews(&self, pr_number: u64) -> Result<Vec<ReviewComment>>;
+    async fn push_branch(&self, worktree_path: &std::path::Path, branch: &str) -> Result<()>;
+    async fn push_current_branch(&self, worktree_path: &std::path::Path) -> Result<()>;
+    async fn force_push_current_branch(&self, worktree_path: &std::path::Path) -> Result<()>;
+    async fn post_pr_comment(&self, pr_number: u64, body: &str) -> Result<()>;
+    async fn reply_to_inline_comment(&self, pr_number: u64, comment_id: u64, body: &str) -> Result<()>;
+    async fn list_unresolved_bot_threads(&self, pr_number: u64, bot_authors: &[String]) -> Result<Vec<String>>;
+    async fn resolve_review_thread(&self, thread_id: &str) -> Result<()>;
+}
 
 pub struct GitHubClient {
     owner: String,
@@ -40,7 +56,34 @@ impl GitHubClient {
         Ok(resp)
     }
 
-    pub async fn create_pr(&self, branch: &str, base: &str, title: &str, body: &str) -> Result<PrHandle> {
+    async fn find_existing_pr(&self, branch: &str) -> Result<PrHandle> {
+        let page = self
+            .octocrab
+            .pulls(&self.owner, &self.repo)
+            .list()
+            .head(format!("{}:{}", self.owner, branch))
+            .state(octocrab::params::State::Open)
+            .send()
+            .await
+            .map_err(|e| HiveError::GitHub(e.to_string()))?;
+
+        let pr = page.items.first().ok_or_else(|| {
+            HiveError::GitHub(format!(
+                "PR already exists for branch '{branch}' but could not be found"
+            ))
+        })?;
+
+        Ok(PrHandle {
+            number: pr.number,
+            url: pr.html_url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
+            head_sha: pr.head.sha.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl GitHub for GitHubClient {
+    async fn create_pr(&self, branch: &str, base: &str, title: &str, body: &str) -> Result<PrHandle> {
         let result = self
             .octocrab
             .pulls(&self.owner, &self.repo)
@@ -68,31 +111,7 @@ impl GitHubClient {
         }
     }
 
-    async fn find_existing_pr(&self, branch: &str) -> Result<PrHandle> {
-        let page = self
-            .octocrab
-            .pulls(&self.owner, &self.repo)
-            .list()
-            .head(format!("{}:{}", self.owner, branch))
-            .state(octocrab::params::State::Open)
-            .send()
-            .await
-            .map_err(|e| HiveError::GitHub(e.to_string()))?;
-
-        let pr = page.items.first().ok_or_else(|| {
-            HiveError::GitHub(format!(
-                "PR already exists for branch '{branch}' but could not be found"
-            ))
-        })?;
-
-        Ok(PrHandle {
-            number: pr.number,
-            url: pr.html_url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
-            head_sha: pr.head.sha.clone(),
-        })
-    }
-
-    pub async fn poll_pr_status(&self, pr_number: u64) -> Result<PrStatus> {
+    async fn poll_pr_status(&self, pr_number: u64) -> Result<PrStatus> {
         let pr = self
             .octocrab
             .pulls(&self.owner, &self.repo)
@@ -119,7 +138,7 @@ impl GitHubClient {
         }
     }
 
-    pub async fn poll_ci(&self, pr_number: u64) -> Result<CiStatus> {
+    async fn poll_ci(&self, pr_number: u64) -> Result<CiStatus> {
         let pr = self
             .octocrab
             .pulls(&self.owner, &self.repo)
@@ -174,7 +193,7 @@ impl GitHubClient {
         }
     }
 
-    pub async fn poll_reviews(&self, pr_number: u64) -> Result<Vec<ReviewComment>> {
+    async fn poll_reviews(&self, pr_number: u64) -> Result<Vec<ReviewComment>> {
         let mut comments = Vec::new();
 
         // 1. Inline diff comments (line-level annotations)
@@ -261,7 +280,7 @@ impl GitHubClient {
     /// Fetch unresolved review thread IDs for bot authors on a PR.
     ///
     /// Returns GraphQL node IDs that can be passed to `resolve_review_thread`.
-    pub async fn list_unresolved_bot_threads(
+    async fn list_unresolved_bot_threads(
         &self,
         pr_number: u64,
         bot_authors: &[String],
@@ -318,7 +337,7 @@ impl GitHubClient {
     }
 
     /// Resolve a PR review thread by its GraphQL node ID.
-    pub async fn resolve_review_thread(&self, thread_id: &str) -> Result<()> {
+    async fn resolve_review_thread(&self, thread_id: &str) -> Result<()> {
         let query = format!(
             r#"mutation {{
               resolveReviewThread(input: {{ threadId: "{thread_id}" }}) {{
@@ -334,7 +353,7 @@ impl GitHubClient {
 
     /// Push the current branch from a worktree. Assumes upstream is already set
     /// (via `push -u` during RaisePr).
-    pub async fn push_current_branch(
+    async fn push_current_branch(
         &self,
         worktree_path: &std::path::Path,
     ) -> Result<()> {
@@ -353,7 +372,7 @@ impl GitHubClient {
 
     /// Force-push the current branch from a worktree using --force-with-lease.
     /// Assumes upstream is already set (via `push -u` during RaisePr).
-    pub async fn force_push_current_branch(
+    async fn force_push_current_branch(
         &self,
         worktree_path: &std::path::Path,
     ) -> Result<()> {
@@ -371,7 +390,7 @@ impl GitHubClient {
     }
 
     /// Reply to an inline review comment on a PR.
-    pub async fn reply_to_inline_comment(
+    async fn reply_to_inline_comment(
         &self,
         pr_number: u64,
         comment_id: u64,
@@ -391,7 +410,7 @@ impl GitHubClient {
     }
 
     /// Post a general comment on a PR (issue comment endpoint).
-    pub async fn post_pr_comment(
+    async fn post_pr_comment(
         &self,
         pr_number: u64,
         body: &str,
@@ -407,7 +426,7 @@ impl GitHubClient {
         Ok(())
     }
 
-    pub async fn push_branch(
+    async fn push_branch(
         &self,
         worktree_path: &std::path::Path,
         branch: &str,

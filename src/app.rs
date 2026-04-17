@@ -129,7 +129,7 @@ pub async fn run(repo_path: &str) -> Result<()> {
     let tui_project_name = project.name.clone();
 
     // Resolve GitHub client
-    let github_client: Option<Arc<crate::git::github::GitHubClient>> = {
+    let github_client: Option<Arc<dyn crate::git::github::GitHub>> = {
         let token = std::env::var("GITHUB_TOKEN")
             .or_else(|_| std::env::var("GH_TOKEN"))
             .ok();

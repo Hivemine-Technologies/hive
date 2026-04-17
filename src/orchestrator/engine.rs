@@ -7,7 +7,7 @@ use crate::config::PhaseConfig;
 use crate::domain::story_run::PrHandle;
 use crate::domain::{AgentEvent, OrchestratorEvent, Phase, PhaseOutcome};
 use crate::error::{HiveError, Result};
-use crate::git::github::{CiStatus, GitHubClient, PrStatus, ReviewComment};
+use crate::git::github::{CiStatus, GitHub, PrStatus, ReviewComment};
 use crate::runners::{AgentRunner, SessionConfig};
 use crate::state::agent_log;
 use crate::trackers::IssueTracker;
@@ -162,7 +162,7 @@ pub fn max_attempts_for_phase(phase: &Phase, phase_config: Option<&PhaseConfig>)
 /// Polls GitHub on an interval. When issues are detected (CI failure,
 /// new bot comments), spawns a fix agent and retries.
 pub async fn run_polling_phase(
-    github: &GitHubClient,
+    github: &dyn GitHub,
     runner: &dyn AgentRunner,
     phase: &Phase,
     pr_number: u64,
@@ -221,7 +221,7 @@ pub async fn run_polling_phase(
 }
 
 async fn run_ci_watch(
-    github: &GitHubClient,
+    github: &dyn GitHub,
     runner: &dyn AgentRunner,
     pr_number: u64,
     issue_id: &str,
@@ -356,7 +356,7 @@ async fn run_ci_watch(
 }
 
 async fn run_bot_reviews(
-    github: &GitHubClient,
+    github: &dyn GitHub,
     runner: &dyn AgentRunner,
     pr_number: u64,
     issue_id: &str,
@@ -593,7 +593,7 @@ async fn run_bot_reviews(
 }
 
 async fn run_pr_watch(
-    github: &GitHubClient,
+    github: &dyn GitHub,
     runner: &dyn AgentRunner,
     pr_number: u64,
     issue_id: &str,
@@ -950,7 +950,7 @@ pub struct DirectPhaseResult {
 /// a short agent session to generate a structured PR body.
 pub async fn run_direct_phase(
     phase: &Phase,
-    github: &GitHubClient,
+    github: &dyn GitHub,
     tracker: &dyn IssueTracker,
     runner: &dyn AgentRunner,
     issue_id: &str,
@@ -1000,7 +1000,7 @@ pub async fn run_direct_phase(
 }
 
 async fn run_raise_pr(
-    github: &GitHubClient,
+    github: &dyn GitHub,
     tracker: &dyn IssueTracker,
     runner: &dyn AgentRunner,
     issue_id: &str,
@@ -1151,7 +1151,7 @@ async fn generate_pr_body(
 }
 
 async fn run_handoff(
-    github: &GitHubClient,
+    github: &dyn GitHub,
     _tracker: &dyn IssueTracker,
     issue_id: &str,
     issue_title: &str,
