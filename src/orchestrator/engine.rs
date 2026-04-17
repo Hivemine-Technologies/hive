@@ -7,7 +7,7 @@ use crate::config::PhaseConfig;
 use crate::domain::story_run::PrHandle;
 use crate::domain::{AgentEvent, OrchestratorEvent, Phase, PhaseOutcome};
 use crate::error::{HiveError, Result};
-use crate::git::github::{CiStatus, GitHubClient, ReviewComment};
+use crate::git::github::{CiStatus, GitHub, PrStatus, ReviewComment};
 use crate::runners::{AgentRunner, SessionConfig};
 use crate::state::agent_log;
 use crate::trackers::IssueTracker;
@@ -44,6 +44,7 @@ pub struct PhaseExecutionResult {
 ///
 /// Starts an agent session, streams output to the TUI via event_tx, and
 /// waits for completion.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent_phase(
     runner: &dyn AgentRunner,
     phase: &Phase,
@@ -139,10 +140,9 @@ pub fn resolve_phase_runner_config<'a>(
 
 /// Get max attempts for a phase (default varies by phase type).
 pub fn max_attempts_for_phase(phase: &Phase, phase_config: Option<&PhaseConfig>) -> u8 {
-    if let Some(config) = phase_config {
-        if let Some(max) = config.max_attempts {
-            return max;
-        }
+    if let Some(config) = phase_config
+        && let Some(max) = config.max_attempts {
+        return max;
     }
     // Defaults per spec
     match phase {
@@ -154,25 +154,28 @@ pub fn max_attempts_for_phase(phase: &Phase, phase_config: Option<&PhaseConfig>)
 }
 
 // ---------------------------------------------------------------------------
-// Polling phases (CiWatch, BotReviews)
+// Polling phases (CiWatch, BotReviews, PrWatch)
 // ---------------------------------------------------------------------------
 
 /// Execute a polling phase (CiWatch or BotReviews).
 ///
 /// Polls GitHub on an interval. When issues are detected (CI failure,
 /// new bot comments), spawns a fix agent and retries.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_polling_phase(
-    github: &GitHubClient,
+    github: &dyn GitHub,
     runner: &dyn AgentRunner,
     phase: &Phase,
     pr_number: u64,
     issue_id: &str,
     issue_title: &str,
     working_dir: &std::path::Path,
+    default_branch: &str,
     phase_config: Option<&PhaseConfig>,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
     runs_dir: &Path,
     cancel_token: &tokio_util::sync::CancellationToken,
+    git_ops: &dyn crate::git::worktree::GitOps,
 ) -> Result<PhaseExecutionResult> {
     match phase {
         Phase::CiWatch { .. } => {
@@ -205,6 +208,14 @@ pub async fn run_polling_phase(
             )
             .await
         }
+        Phase::PrWatch => {
+            run_pr_watch(
+                github, runner, pr_number, issue_id, issue_title, working_dir,
+                default_branch, phase_config, event_tx, runs_dir, cancel_token,
+                git_ops,
+            )
+            .await
+        }
         _ => Err(HiveError::Phase {
             phase: phase.to_string(),
             message: "not a polling phase".to_string(),
@@ -212,8 +223,9 @@ pub async fn run_polling_phase(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ci_watch(
-    github: &GitHubClient,
+    github: &dyn GitHub,
     runner: &dyn AgentRunner,
     pr_number: u64,
     issue_id: &str,
@@ -347,8 +359,9 @@ async fn run_ci_watch(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_bot_reviews(
-    github: &GitHubClient,
+    github: &dyn GitHub,
     runner: &dyn AgentRunner,
     pr_number: u64,
     issue_id: &str,
@@ -545,40 +558,274 @@ async fn run_bot_reviews(
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
+
+        let mut resolved_count = 0u32;
         match github
             .list_unresolved_bot_threads(pr_number, &bot_authors)
             .await
         {
-            Ok(thread_ids) if !thread_ids.is_empty() => {
-                let count = thread_ids.len();
+            Ok(thread_ids) => {
                 for tid in &thread_ids {
-                    let _ = github.resolve_review_thread(tid).await;
+                    match github.resolve_review_thread(tid).await {
+                        Ok(()) => resolved_count += 1,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to resolve review thread {tid} on PR #{pr_number}: {e}"
+                            );
+                        }
+                    }
                 }
-                send_and_log(
-                    event_tx,
-                    runs_dir,
-                    issue_id,
-                    AgentEvent::TextDelta(format!(
-                        "[Bot Reviews] Resolved {count} review thread(s). \
-                         Replied to {inline_replied} inline comment(s), \
-                         posted summary for {} review comment(s). Resuming polling...\n",
-                        summary_items.len()
-                    )),
-                )
-                .await;
             }
-            _ => {
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to list unresolved threads on PR #{pr_number}: {e}"
+                );
+            }
+        }
+
+        send_and_log(
+            event_tx,
+            runs_dir,
+            issue_id,
+            AgentEvent::TextDelta(format!(
+                "[Bot Reviews] Resolved {resolved_count} thread(s), \
+                 replied to {inline_replied} inline comment(s), \
+                 posted summary for {} review comment(s). Resuming polling...\n",
+                summary_items.len()
+            )),
+        )
+        .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_pr_watch(
+    github: &dyn GitHub,
+    runner: &dyn AgentRunner,
+    pr_number: u64,
+    issue_id: &str,
+    issue_title: &str,
+    working_dir: &std::path::Path,
+    default_branch: &str,
+    phase_config: Option<&PhaseConfig>,
+    event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
+    cancel_token: &tokio_util::sync::CancellationToken,
+    git_ops: &dyn crate::git::worktree::GitOps,
+) -> Result<PhaseExecutionResult> {
+    // PrWatch defaults to 5-minute polling (vs 30s for CI phases)
+    let poll_interval = phase_config
+        .and_then(|c| c.poll_interval.as_deref())
+        .map(|s| parse_poll_interval(Some(s)))
+        .unwrap_or(Duration::from_secs(300));
+    let max_rebase_attempts = phase_config
+        .and_then(|c| c.max_fix_attempts)
+        .unwrap_or(3);
+    let fix_model = phase_config.and_then(|c| c.fix_model.as_deref());
+
+    let mut rebase_attempts: u8 = 0;
+    let mut total_cost = 0.0;
+    let mut interval = tokio::time::interval(poll_interval);
+
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Ok(PhaseExecutionResult {
+                    outcome: PhaseOutcome::Failed { reason: "Cancelled".to_string() },
+                    cost_usd: total_cost,
+                    session_id: None,
+                });
+            }
+            _ = interval.tick() => {}
+        }
+
+        send_and_log(
+            event_tx, runs_dir, issue_id,
+            AgentEvent::TextDelta(format!(
+                "[PR Watch] Checking PR #{pr_number} status...\n"
+            )),
+        )
+        .await;
+
+        let pr_status = github.poll_pr_status(pr_number).await?;
+
+        match pr_status {
+            PrStatus::Merged => {
                 send_and_log(
-                    event_tx,
-                    runs_dir,
-                    issue_id,
+                    event_tx, runs_dir, issue_id,
+                    AgentEvent::TextDelta(
+                        "[PR Watch] PR merged! Story complete.\n".to_string()
+                    ),
+                )
+                .await;
+                return Ok(PhaseExecutionResult {
+                    outcome: PhaseOutcome::Success,
+                    cost_usd: total_cost,
+                    session_id: None,
+                });
+            }
+            PrStatus::Closed => {
+                send_and_log(
+                    event_tx, runs_dir, issue_id,
+                    AgentEvent::TextDelta(
+                        "[PR Watch] PR closed without merge.\n".to_string()
+                    ),
+                )
+                .await;
+                return Ok(PhaseExecutionResult {
+                    outcome: PhaseOutcome::Success,
+                    cost_usd: total_cost,
+                    session_id: None,
+                });
+            }
+            PrStatus::Conflicts => {
+                if rebase_attempts >= max_rebase_attempts {
+                    return Ok(PhaseExecutionResult {
+                        outcome: PhaseOutcome::NeedsAttention {
+                            reason: format!(
+                                "Rebase attempts exhausted ({rebase_attempts}/{max_rebase_attempts})"
+                            ),
+                        },
+                        cost_usd: total_cost,
+                        session_id: None,
+                    });
+                }
+                rebase_attempts += 1;
+
+                send_and_log(
+                    event_tx, runs_dir, issue_id,
                     AgentEvent::TextDelta(format!(
-                        "[Bot Reviews] Replied to {inline_replied} inline comment(s), \
-                         posted summary for {} review comment(s). Resuming polling...\n",
-                        summary_items.len()
+                        "[PR Watch] Merge conflicts detected. \
+                         Rebase attempt {rebase_attempts}/{max_rebase_attempts}...\n"
                     )),
                 )
                 .await;
+
+                // Try a clean rebase first (no agent cost if no real conflicts in files)
+                let rebase_result = git_ops.rebase(working_dir, default_branch)?;
+
+                match rebase_result {
+                    crate::git::worktree::RebaseResult::Success => {
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Rebase succeeded cleanly. Force pushing...\n"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                        github.force_push_current_branch(working_dir).await?;
+                        rebase_attempts = 0;
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Force push complete. Resuming watch...\n"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                    }
+                    crate::git::worktree::RebaseResult::Conflicts => {
+                        // Rebase was already aborted by rebase_worktree() — spawn agent
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Conflicts found. Spawning agent to resolve...\n"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+
+                        let fix_prompt = prompts::build_rebase_conflict_prompt(
+                            issue_id, issue_title, default_branch,
+                        );
+                        let fix_config = SessionConfig {
+                            working_dir: working_dir.to_path_buf(),
+                            system_prompt: fix_prompt,
+                            model: fix_model.map(|s| s.to_string()),
+                            permission_mode: None,
+                        };
+
+                        let fix_result = run_fix_agent(
+                            runner, fix_config, issue_id, event_tx, runs_dir,
+                        )
+                        .await?;
+                        total_cost += fix_result.cost_usd;
+
+                        // Don't force-push if the agent failed — would push broken state
+                        if !matches!(fix_result.outcome, PhaseOutcome::Success) {
+                            send_and_log(
+                                event_tx, runs_dir, issue_id,
+                                AgentEvent::TextDelta(
+                                    "[PR Watch] Agent failed to resolve conflicts. Will retry on next poll...\n"
+                                        .to_string(),
+                                ),
+                            )
+                            .await;
+                            continue;
+                        }
+
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Agent completed. Force pushing...\n".to_string(),
+                            ),
+                        )
+                        .await;
+                        github.force_push_current_branch(working_dir).await?;
+                        rebase_attempts = 0;
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Force push complete. Resuming watch...\n"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                    }
+                    crate::git::worktree::RebaseResult::Failed => {
+                        // Fetch failure is likely transient (network blip) —
+                        // don't escalate immediately, just log and retry on next poll
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Git fetch failed (network issue?). Will retry on next poll...\n"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            }
+            PrStatus::Clean => {
+                // Check for unresolved bot review threads — if found, regress
+                // to BotReviews so they get handled properly
+                match github.list_unresolved_bot_threads(pr_number, &[]).await {
+                    Ok(threads) if !threads.is_empty() => {
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(format!(
+                                "[PR Watch] Found {} unresolved review thread(s). \
+                                 Regressing to Bot Reviews...\n",
+                                threads.len()
+                            )),
+                        )
+                        .await;
+                        return Ok(PhaseExecutionResult {
+                            outcome: PhaseOutcome::Regress {
+                                phase: Phase::BotReviews { cycle: 0 },
+                            },
+                            cost_usd: total_cost,
+                            session_id: None,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to check for unresolved threads on PR #{pr_number}: {e}"
+                        );
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -600,11 +847,8 @@ async fn run_fix_agent(
 
     use futures::StreamExt;
     while let Some(event) = stream.next().await {
-        match &event {
-            AgentEvent::Complete { cost_usd } => {
-                total_cost = *cost_usd;
-            }
-            _ => {}
+        if let AgentEvent::Complete { cost_usd } = &event {
+            total_cost = *cost_usd;
         }
         send_and_log(event_tx, runs_dir, issue_id, event).await;
     }
@@ -726,21 +970,26 @@ pub async fn fix_cross_review_findings(
 pub struct DirectPhaseResult {
     pub outcome: PhaseOutcome,
     pub pr: Option<PrHandle>,
+    pub cost_usd: f64,
 }
 
 /// Execute a direct phase (RaisePr or Handoff).
 ///
-/// Direct phases perform actions via API calls with no agent involvement.
+/// Direct phases perform actions via API calls. RaisePr optionally spawns
+/// a short agent session to generate a structured PR body.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_direct_phase(
     phase: &Phase,
-    github: &GitHubClient,
+    github: &dyn GitHub,
     tracker: &dyn IssueTracker,
+    runner: &dyn AgentRunner,
     issue_id: &str,
     issue_title: &str,
     issue_description: &str,
     working_dir: &std::path::Path,
     branch: &str,
     default_branch: &str,
+    phase_config: Option<&PhaseConfig>,
     pr: Option<&PrHandle>,
     cost_usd: f64,
     started_at: chrono::DateTime<chrono::Utc>,
@@ -749,15 +998,18 @@ pub async fn run_direct_phase(
 ) -> Result<DirectPhaseResult> {
     match phase {
         Phase::RaisePr => {
+            let (_, model) = resolve_phase_runner_config(phase, phase_config);
             run_raise_pr(
                 github,
                 tracker,
+                runner,
                 issue_id,
                 issue_title,
                 issue_description,
                 working_dir,
                 branch,
                 default_branch,
+                model,
                 event_tx,
                 runs_dir,
             )
@@ -777,15 +1029,18 @@ pub async fn run_direct_phase(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_raise_pr(
-    github: &GitHubClient,
+    github: &dyn GitHub,
     tracker: &dyn IssueTracker,
+    runner: &dyn AgentRunner,
     issue_id: &str,
     issue_title: &str,
     issue_description: &str,
     working_dir: &std::path::Path,
     branch: &str,
     default_branch: &str,
+    model: Option<&str>,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
     runs_dir: &Path,
 ) -> Result<DirectPhaseResult> {
@@ -800,9 +1055,14 @@ async fn run_raise_pr(
 
     github.push_branch(working_dir, branch).await?;
 
-    // Create PR
+    // Generate PR body via agent (falls back to static template on failure)
+    let (body, body_cost) = generate_pr_body(
+        runner, issue_id, issue_title, issue_description,
+        working_dir, default_branch, model, event_tx, runs_dir,
+    )
+    .await;
+
     let title = format!("{issue_id}: {issue_title}");
-    let body = format!("## {issue_title}\n\n{issue_description}\n\n---\n*Automated by Hive*");
 
     send_and_log(
         event_tx,
@@ -833,11 +1093,98 @@ async fn run_raise_pr(
     Ok(DirectPhaseResult {
         outcome: PhaseOutcome::Success,
         pr: Some(pr_handle),
+        cost_usd: body_cost,
     })
 }
 
+/// Generate a structured PR body using a short agent session.
+///
+/// Collects git data (diff stat, commit log), spawns an agent to write
+/// PR_BODY.md, then reads the file. Falls back to a static template
+/// if anything fails.
+#[allow(clippy::too_many_arguments)]
+async fn generate_pr_body(
+    runner: &dyn AgentRunner,
+    issue_id: &str,
+    issue_title: &str,
+    issue_description: &str,
+    working_dir: &std::path::Path,
+    default_branch: &str,
+    model: Option<&str>,
+    event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
+) -> (String, f64) {
+    let fallback = format!(
+        "## {issue_title}\n\n{issue_description}\n\n---\n*Automated by Hive*"
+    );
+
+    // Collect git data
+    let log_output = std::process::Command::new("git")
+        .args(["log", "--oneline", &format!("origin/{default_branch}..HEAD")])
+        .current_dir(working_dir)
+        .output();
+    let log_text = log_output
+        .as_ref()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    let stat_output = std::process::Command::new("git")
+        .args(["diff", &format!("origin/{default_branch}...HEAD"), "--stat"])
+        .current_dir(working_dir)
+        .output();
+    let stat_text = stat_output
+        .as_ref()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    if log_text.is_empty() && stat_text.is_empty() {
+        return (fallback, 0.0);
+    }
+
+    send_and_log(
+        event_tx, runs_dir, issue_id,
+        AgentEvent::TextDelta("[Raise PR] Generating PR description...\n".to_string()),
+    )
+    .await;
+
+    let prompt = prompts::build_pr_body_prompt(
+        issue_id, issue_title, issue_description, &log_text, &stat_text,
+    );
+    let config = SessionConfig {
+        working_dir: working_dir.to_path_buf(),
+        system_prompt: prompt,
+        model: model.map(|s| s.to_string()),
+        permission_mode: None,
+    };
+
+    let result = run_fix_agent(runner, config, issue_id, event_tx, runs_dir).await;
+    let cost = result.as_ref().map(|r| r.cost_usd).unwrap_or(0.0);
+
+    // Read PR_BODY.md
+    let body_path = working_dir.join("PR_BODY.md");
+    match std::fs::read_to_string(&body_path) {
+        Ok(body) if !body.trim().is_empty() => {
+            let _ = std::fs::remove_file(&body_path);
+            send_and_log(
+                event_tx, runs_dir, issue_id,
+                AgentEvent::TextDelta(format!(
+                    "[Raise PR] PR description generated (cost: ${cost:.2})\n"
+                )),
+            )
+            .await;
+            (body, cost)
+        }
+        _ => {
+            tracing::warn!("PR_BODY.md missing or empty for {issue_id}, using fallback");
+            let _ = std::fs::remove_file(&body_path);
+            (fallback, cost)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_handoff(
-    github: &GitHubClient,
+    github: &dyn GitHub,
     _tracker: &dyn IssueTracker,
     issue_id: &str,
     issue_title: &str,
@@ -890,13 +1237,135 @@ async fn run_handoff(
     Ok(DirectPhaseResult {
         outcome: PhaseOutcome::Success,
         pr: None,
+        cost_usd: 0.0,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use futures::Stream;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
     use crate::config::PhaseConfig;
+    use crate::domain::{AgentEvent, Issue, IssueDetail, IssueFilters};
+    use crate::domain::story_run::PrHandle;
+    use crate::git::github::{CiStatus, PrStatus};
+    use crate::git::mock_github::{MockGitHub, MockGitOps};
+    use crate::git::worktree::RebaseResult;
+    use crate::runners::{AgentRunner, SessionConfig, SessionHandle};
+    use crate::trackers::IssueTracker;
+
+    // -----------------------------------------------------------------------
+    // MockRunner
+    // -----------------------------------------------------------------------
+
+    struct MockRunner {
+        /// Events to emit from output_stream (per session, in order).
+        /// Each call to output_stream pops the front item; if empty, emits Complete.
+        sessions: Mutex<std::collections::VecDeque<Vec<AgentEvent>>>,
+    }
+
+    impl MockRunner {
+        fn new() -> Self {
+            Self {
+                sessions: Mutex::new(std::collections::VecDeque::new()),
+            }
+        }
+
+        /// Queue a sequence of events for the next session.
+        fn push_session_events(&self, events: Vec<AgentEvent>) {
+            self.sessions.lock().unwrap().push_back(events);
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunner for MockRunner {
+        async fn start_session(&self, _config: SessionConfig) -> crate::error::Result<SessionHandle> {
+            Ok(SessionHandle {
+                session_id: "test-session-id".to_string(),
+            })
+        }
+
+        fn output_stream(
+            &self,
+            _session: &SessionHandle,
+        ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send>> {
+            let events = self
+                .sessions
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| vec![AgentEvent::Complete { cost_usd: 0.0 }]);
+            Box::pin(futures::stream::iter(events))
+        }
+
+        async fn cancel(&self, _session: &SessionHandle) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // MockTracker
+    // -----------------------------------------------------------------------
+
+    struct MockTracker;
+
+    #[async_trait]
+    impl IssueTracker for MockTracker {
+        async fn list_ready(&self, _filters: &IssueFilters) -> crate::error::Result<Vec<Issue>> {
+            Ok(vec![])
+        }
+
+        async fn start_issue(&self, _id: &str) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn finish_issue(&self, _id: &str) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn get_issue(&self, id: &str) -> crate::error::Result<IssueDetail> {
+            Ok(IssueDetail {
+                id: id.to_string(),
+                title: "Test Issue".to_string(),
+                description: "Test description".to_string(),
+                acceptance_criteria: None,
+                priority: None,
+                labels: vec![],
+                url: format!("https://example.com/issues/{id}"),
+            })
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn short_poll_config() -> PhaseConfig {
+        PhaseConfig {
+            enabled: true,
+            runner: None,
+            model: None,
+            max_attempts: None,
+            poll_interval: Some("1s".to_string()),
+            max_fix_attempts: Some(3),
+            max_fix_cycles: Some(3),
+            fix_runner: None,
+            fix_model: None,
+            wait_for: None,
+        }
+    }
+
+    fn make_channel() -> mpsc::Sender<OrchestratorEvent> {
+        let (tx, _rx) = mpsc::channel(64);
+        tx
+    }
 
     fn test_phase_config(enabled: bool) -> PhaseConfig {
         PhaseConfig {
@@ -911,6 +1380,410 @@ mod tests {
             fix_model: None,
             wait_for: None,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // PR Watch tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_pr_watch_merged() {
+        let github = MockGitHub::new();
+        github
+            .pr_status_responses
+            .lock()
+            .unwrap()
+            .push_back(PrStatus::Merged);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-1",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &MockGitOps::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+        assert_eq!(*github.force_push_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_closed() {
+        let github = MockGitHub::new();
+        github
+            .pr_status_responses
+            .lock()
+            .unwrap()
+            .push_back(PrStatus::Closed);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-2",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &MockGitOps::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+        assert_eq!(*github.force_push_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_clean_stays_watching() {
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Clean);
+            q.push_back(PrStatus::Merged);
+        }
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-3",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &MockGitOps::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success after Clean+Merged, got {:?}",
+            result.outcome
+        );
+        assert_eq!(*github.force_push_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_conflicts_triggers_force_push() {
+        // MockGitOps returns RebaseResult::Success → clean rebase → force push
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Conflicts);
+            q.push_back(PrStatus::Merged);
+        }
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-4",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &MockGitOps::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success after Conflicts+Merged, got {:?}",
+            result.outcome
+        );
+        // MockGitOps returns RebaseResult::Success, so force push is triggered
+        assert_eq!(*github.force_push_count.lock().unwrap(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // CI Watch tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_ci_watch_passes() {
+        let github = MockGitHub::new();
+        github
+            .ci_status_responses
+            .lock()
+            .unwrap()
+            .push_back(CiStatus::Passed);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_ci_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-5",
+            "Test Issue",
+            working_dir.path(),
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ci_watch_fails_then_passes() {
+        let github = MockGitHub::new();
+        {
+            let mut q = github.ci_status_responses.lock().unwrap();
+            q.push_back(CiStatus::Failed {
+                failures: vec!["lint".to_string()],
+            });
+            q.push_back(CiStatus::Passed);
+        }
+
+        // Queue one session for the fix agent
+        let runner = MockRunner::new();
+        runner.push_session_events(vec![AgentEvent::Complete { cost_usd: 0.5 }]);
+
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_ci_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-6",
+            "Test Issue",
+            working_dir.path(),
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success after fail+pass, got {:?}",
+            result.outcome
+        );
+        // Fix agent completed → push_current_branch was called once
+        assert_eq!(*github.push_count.lock().unwrap(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Raise PR / Handoff direct phase tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_raise_pr_creates_draft() {
+        let github = MockGitHub::new();
+        let tracker = MockTracker;
+        // MockRunner: generate_pr_body will call git log/diff which yields empty
+        // output (no real git) so the fallback is used — no agent session needed.
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+
+        let result = run_direct_phase(
+            &Phase::RaisePr,
+            &github,
+            &tracker,
+            &runner,
+            "TEST-7",
+            "Create feature",
+            "Feature description",
+            working_dir.path(),
+            "TEST-7/create-feature",
+            "main",
+            None,
+            None,
+            0.0,
+            chrono::Utc::now(),
+            &event_tx,
+            runs_dir.path(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+        assert_eq!(
+            github.pushed_branches.lock().unwrap().len(),
+            1,
+            "expected one branch push"
+        );
+        assert_eq!(
+            github.created_prs.lock().unwrap().len(),
+            1,
+            "expected one PR created"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handoff_posts_summary() {
+        let github = MockGitHub::new();
+        let tracker = MockTracker;
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+
+        let pr = PrHandle {
+            number: 1,
+            url: "https://github.com/test/repo/pull/1".to_string(),
+            head_sha: "abc123".to_string(),
+        };
+
+        let result = run_direct_phase(
+            &Phase::Handoff,
+            &github,
+            &tracker,
+            &runner,
+            "TEST-8",
+            "Test handoff",
+            "Test description",
+            working_dir.path(),
+            "TEST-8/branch",
+            "main",
+            None,
+            Some(&pr),
+            1.23,
+            chrono::Utc::now(),
+            &event_tx,
+            runs_dir.path(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+
+        let comments = github.posted_comments.lock().unwrap();
+        assert_eq!(comments.len(), 1, "expected one comment posted");
+        assert!(
+            comments[0].1.contains("Hive Summary"),
+            "comment should contain 'Hive Summary', got: {}",
+            comments[0].1
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Bot Reviews tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_bot_reviews_no_comments_completes() {
+        let github = MockGitHub::new();
+        // Two empty polls → quiet_polls reaches 2 → done
+        {
+            let mut q = github.review_responses.lock().unwrap();
+            q.push_back(vec![]);
+            q.push_back(vec![]);
+        }
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_bot_reviews(
+            &github,
+            &runner,
+            1,
+            "TEST-9",
+            "Test Issue",
+            working_dir.path(),
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success after 2 quiet polls, got {:?}",
+            result.outcome
+        );
     }
 
     #[test]
@@ -976,5 +1849,353 @@ mod tests {
     #[test]
     fn test_parse_poll_interval_invalid() {
         assert_eq!(parse_poll_interval(Some("abc")), Duration::from_secs(30));
+    }
+
+    // -----------------------------------------------------------------------
+    // PrWatch negative / edge case tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_pr_watch_rebase_attempts_exhausted() {
+        // 3 consecutive Conflicts with Failed rebases → counter increments
+        // without resetting → exhaustion → NeedsAttention
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Conflicts); // attempt 1: 0<3, rebase fails
+            q.push_back(PrStatus::Conflicts); // attempt 2: 1<3, rebase fails
+            q.push_back(PrStatus::Conflicts); // attempt 3: 2<3, rebase fails
+            q.push_back(PrStatus::Conflicts); // attempt 4: 3>=3 → exhausted
+        }
+
+        // Rebase fails (fetch failure) so counter increments without resetting
+        let git_ops = MockGitOps::new();
+        {
+            let mut q = git_ops.rebase_responses.lock().unwrap();
+            q.push_back(RebaseResult::Failed);
+            q.push_back(RebaseResult::Failed);
+            q.push_back(RebaseResult::Failed);
+        }
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-EXHAUST",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &git_ops,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::NeedsAttention { .. }),
+            "expected NeedsAttention after exhausted rebase attempts, got {:?}",
+            result.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_rebase_conflicts_spawns_agent() {
+        // Rebase returns Conflicts → agent spawned → force push
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Conflicts);
+            q.push_back(PrStatus::Merged);
+        }
+
+        let runner = MockRunner::new();
+        // Queue a session for the rebase conflict agent
+        runner.push_session_events(vec![AgentEvent::Complete { cost_usd: 1.0 }]);
+
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        // MockGitOps returns Conflicts (not Success) → agent path
+        let git_ops = MockGitOps::new();
+        git_ops
+            .rebase_responses
+            .lock()
+            .unwrap()
+            .push_back(RebaseResult::Conflicts);
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-AGENT",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &git_ops,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+        // Agent succeeded → force push happened
+        assert_eq!(*github.force_push_count.lock().unwrap(), 1);
+        // Cost should include the agent session
+        assert!(result.cost_usd > 0.0, "expected agent cost tracked");
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_fetch_failure_retries() {
+        // Fetch fails (RebaseResult::Failed) → logs and continues → next poll clean → merged
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Conflicts);
+            q.push_back(PrStatus::Merged);
+        }
+
+        let git_ops = MockGitOps::new();
+        git_ops
+            .rebase_responses
+            .lock()
+            .unwrap()
+            .push_back(RebaseResult::Failed);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-FETCH-FAIL",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &git_ops,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success after fetch failure + merged, got {:?}",
+            result.outcome
+        );
+        // Fetch failed → no force push on first poll, then merged on second
+        assert_eq!(*github.force_push_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_cancellation() {
+        // Cancel immediately → should return Failed with "Cancelled"
+        let github = MockGitHub::new();
+        // Queue Clean responses — but cancel fires before they're consumed
+        github
+            .pr_status_responses
+            .lock()
+            .unwrap()
+            .push_back(PrStatus::Clean);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // Cancel immediately
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-CANCEL",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &MockGitOps::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Failed { ref reason } if reason.contains("Cancelled")),
+            "expected Failed(Cancelled), got {:?}",
+            result.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ci_watch_exhausts_fix_attempts() {
+        // CI fails 4 times → max_fix_attempts (3) exhausted → NeedsAttention
+        let github = MockGitHub::new();
+        {
+            let mut q = github.ci_status_responses.lock().unwrap();
+            q.push_back(CiStatus::Failed { failures: vec!["lint".into()] });
+            q.push_back(CiStatus::Failed { failures: vec!["lint".into()] });
+            q.push_back(CiStatus::Failed { failures: vec!["lint".into()] });
+            q.push_back(CiStatus::Failed { failures: vec!["lint".into()] });
+        }
+
+        let runner = MockRunner::new();
+        // Queue 3 fix agent sessions
+        runner.push_session_events(vec![AgentEvent::Complete { cost_usd: 0.0 }]);
+        runner.push_session_events(vec![AgentEvent::Complete { cost_usd: 0.0 }]);
+        runner.push_session_events(vec![AgentEvent::Complete { cost_usd: 0.0 }]);
+
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_ci_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-CI-EXHAUST",
+            "Test Issue",
+            working_dir.path(),
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::NeedsAttention { .. }),
+            "expected NeedsAttention after exhausted CI fix attempts, got {:?}",
+            result.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_regresses_to_bot_reviews_on_unresolved_threads() {
+        // Clean PR status but unresolved bot threads → Regress to BotReviews
+        let github = MockGitHub::new();
+        github
+            .pr_status_responses
+            .lock()
+            .unwrap()
+            .push_back(PrStatus::Clean);
+        github
+            .unresolved_threads_responses
+            .lock()
+            .unwrap()
+            .push_back(vec!["thread-1".to_string(), "thread-2".to_string()]);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-REGRESS",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &MockGitOps::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(
+                result.outcome,
+                PhaseOutcome::Regress { phase: Phase::BotReviews { cycle: 0 } }
+            ),
+            "expected Regress to BotReviews, got {:?}",
+            result.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_no_regress_when_no_threads() {
+        // Clean PR status, no unresolved threads → keep watching → Merged
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Clean);
+            q.push_back(PrStatus::Merged);
+        }
+        // Empty threads response (no unresolved threads)
+        github
+            .unresolved_threads_responses
+            .lock()
+            .unwrap()
+            .push_back(vec![]);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-NO-REGRESS",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &MockGitOps::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success (merged), got {:?}",
+            result.outcome
+        );
     }
 }

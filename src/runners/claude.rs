@@ -261,12 +261,10 @@ pub fn parse_claude_event(line: &str) -> Result<Option<AgentEvent>> {
             }
         }
         "content_block_delta" => {
-            if let Some(delta) = v["delta"].as_object() {
-                if delta.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
-                    if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                        return Ok(Some(AgentEvent::TextDelta(text.to_string())));
-                    }
-                }
+            if let Some(delta) = v["delta"].as_object()
+                && delta.get("type").and_then(|t| t.as_str()) == Some("text_delta")
+                && let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                return Ok(Some(AgentEvent::TextDelta(text.to_string())));
             }
             Ok(None)
         }

@@ -19,6 +19,11 @@ pub struct StoryRun {
     pub cost_usd: f64,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// When set, the story is in a regression cycle (e.g., PrWatch kicked back
+    /// to BotReviews). After the regressed phase completes, jump directly to
+    /// this phase instead of calling advance().
+    #[serde(default)]
+    pub regression_return: Option<Phase>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,6 +56,10 @@ pub enum PhaseOutcome {
     Skipped,
     Failed { reason: String },
     NeedsAttention { reason: String },
+    /// Regress to an earlier phase (e.g., PrWatch → BotReviews).
+    /// After the regressed phase completes, the loop returns to the
+    /// phase that triggered the regression.
+    Regress { phase: Phase },
 }
 
 impl StoryRun {
@@ -69,6 +78,7 @@ impl StoryRun {
             cost_usd: 0.0,
             started_at: now,
             updated_at: now,
+            regression_return: None,
         }
     }
 }

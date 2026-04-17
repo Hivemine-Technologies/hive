@@ -16,7 +16,7 @@ use crate::domain::{
     TuiCommand,
 };
 use crate::error::Result;
-use crate::git::github::GitHubClient;
+use crate::git::github::GitHub;
 use crate::notifiers::Notifier;
 use crate::runners::AgentRunner;
 use crate::state::persistence;
@@ -29,25 +29,30 @@ pub struct Orchestrator {
     config: Arc<ProjectConfig>,
     runs: HashMap<String, StoryRun>,
     runs_dir: PathBuf,
-    runner: Arc<dyn AgentRunner>,
+    runners: HashMap<String, Arc<dyn AgentRunner>>,
+    default_runner: String,
     tracker: Arc<dyn IssueTracker>,
-    github: Option<Arc<GitHubClient>>,
+    github: Option<Arc<dyn GitHub>>,
     notifier: Option<Arc<dyn Notifier>>,
     event_tx: mpsc::Sender<OrchestratorEvent>,
     command_rx: mpsc::Receiver<TuiCommand>,
     cancel_tokens: HashMap<String, CancellationToken>,
+    git_ops: Arc<dyn crate::git::worktree::GitOps>,
 }
 
 impl Orchestrator {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: ProjectConfig,
         runs_dir: PathBuf,
-        runner: Arc<dyn AgentRunner>,
+        runners: HashMap<String, Arc<dyn AgentRunner>>,
+        default_runner: String,
         tracker: Arc<dyn IssueTracker>,
-        github: Option<Arc<GitHubClient>>,
+        github: Option<Arc<dyn GitHub>>,
         notifier: Option<Arc<dyn Notifier>>,
         event_tx: mpsc::Sender<OrchestratorEvent>,
         command_rx: mpsc::Receiver<TuiCommand>,
+        git_ops: Arc<dyn crate::git::worktree::GitOps>,
     ) -> Result<Self> {
         let runs_vec = persistence::load_all_runs(&runs_dir)?;
         let runs: HashMap<String, StoryRun> = runs_vec
@@ -58,14 +63,25 @@ impl Orchestrator {
             config: Arc::new(config),
             runs,
             runs_dir,
-            runner,
+            runners,
+            default_runner,
             tracker,
             github,
             notifier,
             event_tx,
             command_rx,
             cancel_tokens: HashMap::new(),
+            git_ops,
         })
+    }
+
+    /// Resolve the runner for a given phase config, falling back to the default.
+    fn resolve_runner(&self, phase_runner: Option<&str>) -> Arc<dyn AgentRunner> {
+        phase_runner
+            .and_then(|name| self.runners.get(name))
+            .or_else(|| self.runners.get(&self.default_runner))
+            .expect("default runner must be configured")
+            .clone()
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -113,9 +129,6 @@ impl Orchestrator {
                         }
                         TuiCommand::RetryStory { issue_id } => {
                             self.retry_story(&issue_id).await?;
-                        }
-                        TuiCommand::RebaseStory { issue_id } => {
-                            self.rebase_story(&issue_id).await?;
                         }
                         TuiCommand::CopyWorktreePath => {}
                     }
@@ -190,16 +203,19 @@ impl Orchestrator {
             .insert(run.issue_id.clone(), token.clone());
 
         let config = self.config.clone();
-        let runner = self.runner.clone();
+        let runners = self.runners.clone();
+        let default_runner = self.default_runner.clone();
         let tracker = self.tracker.clone();
         let github = self.github.clone();
         let notifier = self.notifier.clone();
         let event_tx = self.event_tx.clone();
         let runs_dir = self.runs_dir.clone();
+        let git_ops = self.git_ops.clone();
 
         tokio::spawn(async move {
             let result = story_phase_loop(
-                run, config, runner, tracker, github, notifier, event_tx, runs_dir, token,
+                run, config, runners, default_runner, tracker, github, notifier, event_tx,
+                runs_dir, token, git_ops,
             )
             .await;
             if let Err(e) = result {
@@ -214,13 +230,16 @@ impl Orchestrator {
             token.cancel();
         }
 
+        // Resolve runner before mutable borrow of self.runs
+        let cancel_runner = self.resolve_runner(None);
+
         if let Some(run) = self.runs.get_mut(issue_id) {
             // Also cancel any running agent session
             if let Some(ref session_id) = run.session_id {
                 let handle = crate::runners::SessionHandle {
                     session_id: session_id.clone(),
                 };
-                let _ = self.runner.cancel(&handle).await;
+                let _ = cancel_runner.cancel(&handle).await;
             }
             run.status = RunStatus::Failed;
             run.updated_at = Utc::now();
@@ -273,37 +292,42 @@ impl Orchestrator {
         Ok(())
     }
 
-    async fn rebase_story(&mut self, issue_id: &str) -> Result<()> {
-        if let Some(run) = self.runs.get(issue_id) {
-            if let Some(ref wt_path) = run.worktree {
-                let result = crate::git::worktree::rebase_worktree(wt_path, &self.config.github.default_branch)?;
-                tracing::info!("rebase result for {issue_id}: {result:?}");
-            }
-        }
-        Ok(())
-    }
-
     #[allow(dead_code)]
     async fn send_notification(&self, event: NotifyEvent) {
-        if let Some(ref notifier) = self.notifier {
-            if let Err(e) = notifier.notify(event).await {
-                tracing::warn!("notification failed: {e}");
-            }
+        if let Some(ref notifier) = self.notifier
+            && let Err(e) = notifier.notify(event).await {
+            tracing::warn!("notification failed: {e}");
         }
     }
 }
 
 /// The main phase execution loop for a single story, running in its own tokio task.
+/// Resolve the runner for a phase, falling back to the default.
+fn resolve_phase_runner<'a>(
+    runners: &'a HashMap<String, Arc<dyn AgentRunner>>,
+    default_runner: &str,
+    phase_config: Option<&crate::config::PhaseConfig>,
+) -> &'a Arc<dyn AgentRunner> {
+    phase_config
+        .and_then(|c| c.runner.as_deref())
+        .and_then(|name| runners.get(name))
+        .or_else(|| runners.get(default_runner))
+        .expect("default runner must be configured")
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn story_phase_loop(
     mut run: StoryRun,
     config: Arc<ProjectConfig>,
-    runner: Arc<dyn AgentRunner>,
+    runners: HashMap<String, Arc<dyn AgentRunner>>,
+    default_runner: String,
     tracker: Arc<dyn IssueTracker>,
-    github: Option<Arc<GitHubClient>>,
+    github: Option<Arc<dyn GitHub>>,
     notifier: Option<Arc<dyn Notifier>>,
     event_tx: mpsc::Sender<OrchestratorEvent>,
     runs_dir: PathBuf,
     cancel_token: CancellationToken,
+    git_ops: Arc<dyn crate::git::worktree::GitOps>,
 ) -> Result<()> {
     let issue_id = run.issue_id.clone();
 
@@ -354,7 +378,7 @@ async fn story_phase_loop(
             let (_, model) = engine::resolve_phase_runner_config(&run.phase, phase_config);
 
             let result = run_agent_phase(
-                runner.as_ref(),
+                resolve_phase_runner(&runners, &default_runner, phase_config).as_ref(),
                 &run.phase,
                 &issue_id,
                 &issue_detail.title,
@@ -389,7 +413,7 @@ async fn story_phase_loop(
                     };
                     attempt += 1;
                     let retry_result = run_agent_phase(
-                        runner.as_ref(),
+                        resolve_phase_runner(&runners, &default_runner, phase_config).as_ref(),
                         &run.phase,
                         &issue_id,
                         &issue_detail.title,
@@ -437,7 +461,7 @@ async fn story_phase_loop(
                 let (_, fix_model) =
                     engine::resolve_phase_runner_config(&Phase::Implement, implement_config);
                 let fix_cost = engine::fix_cross_review_findings(
-                    runner.as_ref(),
+                    resolve_phase_runner(&runners, &default_runner, implement_config).as_ref(),
                     &issue_id,
                     &issue_detail.title,
                     working_dir,
@@ -460,16 +484,18 @@ async fn story_phase_loop(
                 } else {
                     let result = run_polling_phase(
                         g.as_ref(),
-                        runner.as_ref(),
+                        resolve_phase_runner(&runners, &default_runner, phase_config).as_ref(),
                         &run.phase,
                         pr_number,
                         &issue_id,
                         &issue_detail.title,
                         working_dir,
+                        &config.github.default_branch,
                         phase_config,
                         &event_tx,
                         &runs_dir,
                         &cancel_token,
+                        git_ops.as_ref(),
                     )
                     .await?;
                     run.cost_usd += result.cost_usd;
@@ -487,12 +513,14 @@ async fn story_phase_loop(
                     &run.phase,
                     g.as_ref(),
                     tracker.as_ref(),
+                    resolve_phase_runner(&runners, &default_runner, phase_config).as_ref(),
                     &issue_id,
                     &issue_detail.title,
                     &issue_detail.description,
                     working_dir,
                     branch,
                     &config.github.default_branch,
+                    phase_config,
                     run.pr.as_ref(),
                     run.cost_usd,
                     run.started_at,
@@ -505,6 +533,7 @@ async fn story_phase_loop(
                 if let Some(pr) = result.pr {
                     run.pr = Some(pr);
                 }
+                run.cost_usd += result.cost_usd;
 
                 result.outcome
             } else {
@@ -530,22 +559,57 @@ async fn story_phase_loop(
 
         // Handle outcome
         match phase_outcome {
-            PhaseOutcome::Success | PhaseOutcome::Skipped => {
+            PhaseOutcome::Regress { phase: target } => {
                 let old_phase = run.phase.clone();
-                let next = advance(run.phase.clone(), &config.phases);
-                run.phase = next.clone();
+                run.regression_return = Some(old_phase.clone());
+                run.phase = target.clone();
                 run.updated_at = Utc::now();
 
                 let _ = event_tx
                     .send(OrchestratorEvent::PhaseTransition {
                         issue_id: issue_id.clone(),
                         from: old_phase,
+                        to: target,
+                    })
+                    .await;
+            }
+            PhaseOutcome::Success | PhaseOutcome::Skipped => {
+                let old_phase = run.phase.clone();
+
+                // If returning from a regression, jump back instead of advancing
+                let next = if let Some(return_phase) = run.regression_return.take() {
+                    return_phase
+                } else {
+                    advance(run.phase.clone(), &config.phases)
+                };
+
+                run.phase = next.clone();
+                run.updated_at = Utc::now();
+
+                let _ = event_tx
+                    .send(OrchestratorEvent::PhaseTransition {
+                        issue_id: issue_id.clone(),
+                        from: old_phase.clone(),
                         to: next.clone(),
                     })
                     .await;
 
                 if matches!(next, Phase::Complete) {
                     run.status = RunStatus::Complete;
+
+                    // Cleanup worktree after PrWatch (PR merged or closed)
+                    if matches!(old_phase, Phase::PrWatch) && run.worktree.is_some() {
+                        let repo_path = std::path::Path::new(&*config.repo_path);
+                        let worktree_dir = repo_path.join(&config.worktree_dir);
+                        match git_ops.remove(repo_path, &issue_id, &worktree_dir) {
+                            Ok(()) => tracing::info!("Cleaned up worktree for {issue_id}"),
+                            Err(e) => tracing::warn!(
+                                "Failed to cleanup worktree for {issue_id}: {e}"
+                            ),
+                        }
+                        run.worktree = None;
+                    }
+
                     send_notification_if_configured(
                         &notifier,
                         NotifyEvent::StoryComplete {
@@ -622,10 +686,9 @@ async fn story_phase_loop(
 }
 
 async fn send_notification_if_configured(notifier: &Option<Arc<dyn Notifier>>, event: NotifyEvent) {
-    if let Some(notifier) = notifier {
-        if let Err(e) = notifier.notify(event).await {
-            tracing::warn!("notification failed: {e}");
-        }
+    if let Some(notifier) = notifier
+        && let Err(e) = notifier.notify(event).await {
+        tracing::warn!("notification failed: {e}");
     }
 }
 

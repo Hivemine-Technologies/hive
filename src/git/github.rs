@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use octocrab::models::CommentId;
 use octocrab::params::repos::Commitish;
 use octocrab::Octocrab;
@@ -5,6 +6,21 @@ use serde_json::Value;
 
 use crate::domain::story_run::PrHandle;
 use crate::error::{HiveError, Result};
+
+#[async_trait]
+pub trait GitHub: Send + Sync {
+    async fn create_pr(&self, branch: &str, base: &str, title: &str, body: &str) -> Result<PrHandle>;
+    async fn poll_ci(&self, pr_number: u64) -> Result<CiStatus>;
+    async fn poll_pr_status(&self, pr_number: u64) -> Result<PrStatus>;
+    async fn poll_reviews(&self, pr_number: u64) -> Result<Vec<ReviewComment>>;
+    async fn push_branch(&self, worktree_path: &std::path::Path, branch: &str) -> Result<()>;
+    async fn push_current_branch(&self, worktree_path: &std::path::Path) -> Result<()>;
+    async fn force_push_current_branch(&self, worktree_path: &std::path::Path) -> Result<()>;
+    async fn post_pr_comment(&self, pr_number: u64, body: &str) -> Result<()>;
+    async fn reply_to_inline_comment(&self, pr_number: u64, comment_id: u64, body: &str) -> Result<()>;
+    async fn list_unresolved_bot_threads(&self, pr_number: u64, bot_authors: &[String]) -> Result<Vec<String>>;
+    async fn resolve_review_thread(&self, thread_id: &str) -> Result<()>;
+}
 
 pub struct GitHubClient {
     owner: String,
@@ -40,33 +56,6 @@ impl GitHubClient {
         Ok(resp)
     }
 
-    pub async fn create_pr(&self, branch: &str, base: &str, title: &str, body: &str) -> Result<PrHandle> {
-        let result = self
-            .octocrab
-            .pulls(&self.owner, &self.repo)
-            .create(title, branch, base)
-            .body(body)
-            .send()
-            .await;
-
-        match result {
-            Ok(pr) => Ok(PrHandle {
-                number: pr.number,
-                url: pr.html_url.map(|u| u.to_string()).unwrap_or_default(),
-                head_sha: pr.head.sha,
-            }),
-            Err(ref e) => match e {
-                octocrab::Error::GitHub { source, .. }
-                    if source.status_code.as_u16() == 422
-                        && source.message.contains("A pull request already exists") =>
-                {
-                    self.find_existing_pr(branch).await
-                }
-                _ => Err(HiveError::GitHub(format!("GitHub API error: {e}"))),
-            },
-        }
-    }
-
     async fn find_existing_pr(&self, branch: &str) -> Result<PrHandle> {
         let page = self
             .octocrab
@@ -90,8 +79,66 @@ impl GitHubClient {
             head_sha: pr.head.sha.clone(),
         })
     }
+}
 
-    pub async fn poll_ci(&self, pr_number: u64) -> Result<CiStatus> {
+#[async_trait]
+impl GitHub for GitHubClient {
+    async fn create_pr(&self, branch: &str, base: &str, title: &str, body: &str) -> Result<PrHandle> {
+        let result = self
+            .octocrab
+            .pulls(&self.owner, &self.repo)
+            .create(title, branch, base)
+            .body(body)
+            .draft(true)
+            .send()
+            .await;
+
+        match result {
+            Ok(pr) => Ok(PrHandle {
+                number: pr.number,
+                url: pr.html_url.map(|u| u.to_string()).unwrap_or_default(),
+                head_sha: pr.head.sha,
+            }),
+            Err(ref e) => match e {
+                octocrab::Error::GitHub { source, .. }
+                    if source.status_code.as_u16() == 422
+                        && source.message.contains("A pull request already exists") =>
+                {
+                    self.find_existing_pr(branch).await
+                }
+                _ => Err(HiveError::GitHub(format!("GitHub API error: {e}"))),
+            },
+        }
+    }
+
+    async fn poll_pr_status(&self, pr_number: u64) -> Result<PrStatus> {
+        let pr = self
+            .octocrab
+            .pulls(&self.owner, &self.repo)
+            .get(pr_number)
+            .await
+            .map_err(|e| HiveError::GitHub(e.to_string()))?;
+
+        // Check merged first — a merged PR also has state=Closed
+        if pr.merged_at.is_some() {
+            return Ok(PrStatus::Merged);
+        }
+
+        // Closed without merge
+        if matches!(pr.state, Some(octocrab::models::IssueState::Closed)) {
+            return Ok(PrStatus::Closed);
+        }
+
+        // Open — check mergeability
+        // GitHub computes mergeable async; None means "not yet computed"
+        // Only trigger rebase when GitHub definitively says false (real conflicts)
+        match pr.mergeable {
+            Some(false) => Ok(PrStatus::Conflicts),
+            _ => Ok(PrStatus::Clean), // Some(true) or None — no action needed
+        }
+    }
+
+    async fn poll_ci(&self, pr_number: u64) -> Result<CiStatus> {
         let pr = self
             .octocrab
             .pulls(&self.owner, &self.repo)
@@ -146,7 +193,7 @@ impl GitHubClient {
         }
     }
 
-    pub async fn poll_reviews(&self, pr_number: u64) -> Result<Vec<ReviewComment>> {
+    async fn poll_reviews(&self, pr_number: u64) -> Result<Vec<ReviewComment>> {
         let mut comments = Vec::new();
 
         // 1. Inline diff comments (line-level annotations)
@@ -233,7 +280,7 @@ impl GitHubClient {
     /// Fetch unresolved review thread IDs for bot authors on a PR.
     ///
     /// Returns GraphQL node IDs that can be passed to `resolve_review_thread`.
-    pub async fn list_unresolved_bot_threads(
+    async fn list_unresolved_bot_threads(
         &self,
         pr_number: u64,
         bot_authors: &[String],
@@ -279,10 +326,9 @@ impl GitHubClient {
                 || bot_authors
                     .iter()
                     .any(|b| author.to_lowercase().contains(&b.to_lowercase()));
-            if is_match {
-                if let Some(id) = thread["id"].as_str() {
-                    thread_ids.push(id.to_string());
-                }
+            if is_match
+                && let Some(id) = thread["id"].as_str() {
+                thread_ids.push(id.to_string());
             }
         }
 
@@ -290,7 +336,7 @@ impl GitHubClient {
     }
 
     /// Resolve a PR review thread by its GraphQL node ID.
-    pub async fn resolve_review_thread(&self, thread_id: &str) -> Result<()> {
+    async fn resolve_review_thread(&self, thread_id: &str) -> Result<()> {
         let query = format!(
             r#"mutation {{
               resolveReviewThread(input: {{ threadId: "{thread_id}" }}) {{
@@ -306,7 +352,7 @@ impl GitHubClient {
 
     /// Push the current branch from a worktree. Assumes upstream is already set
     /// (via `push -u` during RaisePr).
-    pub async fn push_current_branch(
+    async fn push_current_branch(
         &self,
         worktree_path: &std::path::Path,
     ) -> Result<()> {
@@ -323,8 +369,27 @@ impl GitHubClient {
         Ok(())
     }
 
+    /// Force-push the current branch from a worktree using --force-with-lease.
+    /// Assumes upstream is already set (via `push -u` during RaisePr).
+    async fn force_push_current_branch(
+        &self,
+        worktree_path: &std::path::Path,
+    ) -> Result<()> {
+        let output = std::process::Command::new("git")
+            .args(["push", "--force-with-lease"])
+            .current_dir(worktree_path)
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(HiveError::Git(git2::Error::from_str(&format!(
+                "force push failed: {stderr}"
+            ))));
+        }
+        Ok(())
+    }
+
     /// Reply to an inline review comment on a PR.
-    pub async fn reply_to_inline_comment(
+    async fn reply_to_inline_comment(
         &self,
         pr_number: u64,
         comment_id: u64,
@@ -344,7 +409,7 @@ impl GitHubClient {
     }
 
     /// Post a general comment on a PR (issue comment endpoint).
-    pub async fn post_pr_comment(
+    async fn post_pr_comment(
         &self,
         pr_number: u64,
         body: &str,
@@ -360,7 +425,7 @@ impl GitHubClient {
         Ok(())
     }
 
-    pub async fn push_branch(
+    async fn push_branch(
         &self,
         worktree_path: &std::path::Path,
         branch: &str,
@@ -384,6 +449,18 @@ pub enum CiStatus {
     Pending,
     Passed,
     Failed { failures: Vec<String> },
+}
+
+#[derive(Debug, PartialEq)]
+pub enum PrStatus {
+    /// PR was merged into the base branch.
+    Merged,
+    /// PR was closed without merging.
+    Closed,
+    /// PR is open and clean (no conflicts), or mergeability not yet computed.
+    Clean,
+    /// PR is open but has merge conflicts (GitHub's mergeable == false).
+    Conflicts,
 }
 
 #[derive(Debug, Clone)]

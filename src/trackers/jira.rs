@@ -373,13 +373,12 @@ fn walk_adf(v: &Value, out: &mut String) {
         }
     }
     // Add a newline after block-level nodes so paragraphs don't run together.
-    if let Some(kind) = v["type"].as_str() {
-        if matches!(
+    if let Some(kind) = v["type"].as_str()
+        && matches!(
             kind,
             "paragraph" | "heading" | "bulletList" | "orderedList" | "listItem" | "codeBlock"
         ) {
-            out.push('\n');
-        }
+        out.push('\n');
     }
 }
 

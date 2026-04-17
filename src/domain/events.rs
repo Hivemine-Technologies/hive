@@ -3,6 +3,7 @@ use super::phase::Phase;
 use super::story_run::StoryRun;
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum OrchestratorEvent {
     StoryUpdated(StoryRun),
     AgentOutput {
@@ -21,7 +22,6 @@ pub enum TuiCommand {
     StartStory { issue: Issue },
     CancelStory { issue_id: String },
     RetryStory { issue_id: String },
-    RebaseStory { issue_id: String },
     CopyWorktreePath,
     Quit,
 }

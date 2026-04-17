@@ -21,25 +21,31 @@ pub async fn run(repo_path: &str) -> Result<()> {
     let global = load_global_config(&config_dir)?;
     let project = load_project_config(&config_dir, repo_path)?;
 
-    // Resolve the primary runner
-    let runner_name = project
+    // Build all configured runners
+    let mut runners: std::collections::HashMap<String, Arc<dyn AgentRunner>> =
+        std::collections::HashMap::new();
+    for (name, runner_config) in &global.runners {
+        let runner: Arc<dyn AgentRunner> = Arc::new(ClaudeRunner::new(
+            runner_config.command.clone(),
+            runner_config.default_model.clone(),
+            runner_config.permission_mode.clone(),
+        ));
+        runners.insert(name.clone(), runner);
+    }
+
+    // Determine the default runner (first enabled phase's runner, or "claude")
+    let default_runner = project
         .phases
         .values()
         .find(|p| p.enabled && p.runner.is_some())
         .and_then(|p| p.runner.clone())
         .unwrap_or_else(|| "claude".to_string());
 
-    let runner_config = global.runners.get(&runner_name).ok_or_else(|| {
-        HiveError::Config(format!(
-            "runner '{runner_name}' not configured in global config"
-        ))
-    })?;
-
-    let runner: Arc<dyn AgentRunner> = Arc::new(ClaudeRunner::new(
-        runner_config.command.clone(),
-        runner_config.default_model.clone(),
-        runner_config.permission_mode.clone(),
-    ));
+    if !runners.contains_key(&default_runner) {
+        return Err(HiveError::Config(format!(
+            "default runner '{default_runner}' not configured in global config"
+        )));
+    }
 
     // Resolve the tracker
     let tracker_conn = global.trackers.get(&project.tracker).ok_or_else(|| {
@@ -123,7 +129,7 @@ pub async fn run(repo_path: &str) -> Result<()> {
     let tui_project_name = project.name.clone();
 
     // Resolve GitHub client
-    let github_client: Option<Arc<crate::git::github::GitHubClient>> = {
+    let github_client: Option<Arc<dyn crate::git::github::GitHub>> = {
         let token = std::env::var("GITHUB_TOKEN")
             .or_else(|_| std::env::var("GH_TOKEN"))
             .ok();
@@ -144,14 +150,11 @@ pub async fn run(repo_path: &str) -> Result<()> {
 
     // Validate tracker credentials are resolvable
     if project.tracker == "linear" {
-        if let Some(ref key) = tracker_conn.api_key {
-            if key.starts_with("env:") {
-                let var_name = &key[4..];
-                if std::env::var(var_name).is_err() {
-                    eprintln!("⚠ {var_name} is not set. Issue tracker queries will fail.");
-                    eprintln!("  Set it with: export {var_name}=lin_api_...\n");
-                }
-            }
+        if let Some(ref key) = tracker_conn.api_key
+            && let Some(var_name) = key.strip_prefix("env:")
+            && std::env::var(var_name).is_err() {
+            eprintln!("⚠ {var_name} is not set. Issue tracker queries will fail.");
+            eprintln!("  Set it with: export {var_name}=lin_api_...\n");
         }
     } else if project.tracker == "jira" {
         for (label, value) in [
@@ -159,28 +162,31 @@ pub async fn run(repo_path: &str) -> Result<()> {
             ("email", tracker_conn.email.as_ref()),
             ("base_url", tracker_conn.base_url.as_ref()),
         ] {
-            if let Some(v) = value {
-                if let Some(var_name) = v.strip_prefix("env:") {
-                    if std::env::var(var_name).is_err() {
-                        eprintln!(
-                            "⚠ {var_name} (jira {label}) is not set. Jira tracker calls will fail."
-                        );
-                    }
-                }
+            if let Some(v) = value
+                && let Some(var_name) = v.strip_prefix("env:")
+                && std::env::var(var_name).is_err() {
+                eprintln!(
+                    "⚠ {var_name} (jira {label}) is not set. Jira tracker calls will fail."
+                );
             }
         }
     }
+
+    let git_ops: Arc<dyn crate::git::worktree::GitOps> =
+        Arc::new(crate::git::worktree::DefaultGitOps);
 
     // Start orchestrator in background
     let mut orchestrator = Orchestrator::new(
         project,
         runs_dir,
-        runner,
+        runners,
+        default_runner,
         tracker,
         github_client,
         notifier,
         event_tx,
         command_rx,
+        git_ops,
     )?;
     tokio::spawn(async move {
         if let Err(e) = orchestrator.run().await {

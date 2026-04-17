@@ -17,6 +17,7 @@ pub enum Phase {
     BotReviews { cycle: u8 },
     FollowUps,
     Handoff,
+    PrWatch,
     Complete,
     NeedsAttention { reason: String },
 }
@@ -31,6 +32,7 @@ const PIPELINE_PHASES: &[fn() -> Phase] = &[
     || Phase::BotReviews { cycle: 0 },
     || Phase::FollowUps,
     || Phase::Handoff,
+    || Phase::PrWatch,
 ];
 
 impl Phase {
@@ -50,6 +52,7 @@ impl Phase {
             Phase::BotReviews { .. } => "bot-reviews",
             Phase::FollowUps => "follow-ups",
             Phase::Handoff => "handoff",
+            Phase::PrWatch => "pr-watch",
             Phase::Complete => "complete",
             Phase::NeedsAttention { .. } => "needs-attention",
         }
@@ -67,7 +70,7 @@ impl Phase {
     }
 
     pub fn is_polling_phase(&self) -> bool {
-        matches!(self, Phase::CiWatch { .. } | Phase::BotReviews { .. })
+        matches!(self, Phase::CiWatch { .. } | Phase::BotReviews { .. } | Phase::PrWatch)
     }
 
     pub fn is_direct_phase(&self) -> bool {
@@ -94,6 +97,7 @@ impl fmt::Display for Phase {
             Phase::BotReviews { cycle } => write!(f, "Bot Reviews (cycle {})", cycle),
             Phase::FollowUps => write!(f, "Follow-Ups"),
             Phase::Handoff => write!(f, "Handoff"),
+            Phase::PrWatch => write!(f, "PR Watch"),
             Phase::Complete => write!(f, "Complete"),
             Phase::NeedsAttention { reason } => write!(f, "Needs Attention: {}", reason),
         }
@@ -142,6 +146,7 @@ mod tests {
         assert_eq!(phases[6], Phase::BotReviews { cycle: 0 });
         assert_eq!(phases[7], Phase::FollowUps);
         assert_eq!(phases[8], Phase::Handoff);
+        assert_eq!(phases[9], Phase::PrWatch);
     }
 
     #[test]
@@ -227,9 +232,16 @@ mod tests {
     }
 
     #[test]
-    fn test_next_phase_after_handoff_is_complete() {
+    fn test_next_phase_after_handoff_is_pr_watch() {
         let phases_config = HashMap::new();
         let next = next_enabled_phase(&Phase::Handoff, &phases_config);
+        assert_eq!(next, Some(Phase::PrWatch));
+    }
+
+    #[test]
+    fn test_next_phase_after_pr_watch_is_none() {
+        let phases_config = HashMap::new();
+        let next = next_enabled_phase(&Phase::PrWatch, &phases_config);
         assert_eq!(next, None);
     }
 
@@ -239,5 +251,23 @@ mod tests {
         assert_eq!(Phase::SelfReview { attempt: 2 }.config_key(), "self-review");
         assert_eq!(Phase::CiWatch { attempt: 1 }.config_key(), "ci-watch");
         assert_eq!(Phase::BotReviews { cycle: 3 }.config_key(), "bot-reviews");
+    }
+
+    #[test]
+    fn test_pr_watch_in_pipeline() {
+        let phases = Phase::all_in_order();
+        let handoff_idx = phases.iter().position(|p| matches!(p, Phase::Handoff)).unwrap();
+        let pr_watch_idx = phases.iter().position(|p| matches!(p, Phase::PrWatch)).unwrap();
+        assert_eq!(pr_watch_idx, handoff_idx + 1);
+    }
+
+    #[test]
+    fn test_pr_watch_is_polling_phase() {
+        assert!(Phase::PrWatch.is_polling_phase());
+    }
+
+    #[test]
+    fn test_pr_watch_config_key() {
+        assert_eq!(Phase::PrWatch.config_key(), "pr-watch");
     }
 }
