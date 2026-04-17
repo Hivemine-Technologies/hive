@@ -154,7 +154,7 @@ pub fn max_attempts_for_phase(phase: &Phase, phase_config: Option<&PhaseConfig>)
 }
 
 // ---------------------------------------------------------------------------
-// Polling phases (CiWatch, BotReviews)
+// Polling phases (CiWatch, BotReviews, PrWatch)
 // ---------------------------------------------------------------------------
 
 /// Execute a polling phase (CiWatch or BotReviews).
@@ -709,6 +709,7 @@ async fn run_pr_watch(
                         )
                         .await;
                         github.force_push_current_branch(working_dir).await?;
+                        rebase_attempts = 0;
                         send_and_log(
                             event_tx, runs_dir, issue_id,
                             AgentEvent::TextDelta(
@@ -745,6 +746,19 @@ async fn run_pr_watch(
                         .await?;
                         total_cost += fix_result.cost_usd;
 
+                        // Don't force-push if the agent failed — would push broken state
+                        if !matches!(fix_result.outcome, PhaseOutcome::Success) {
+                            send_and_log(
+                                event_tx, runs_dir, issue_id,
+                                AgentEvent::TextDelta(
+                                    "[PR Watch] Agent failed to resolve conflicts. Will retry on next poll...\n"
+                                        .to_string(),
+                                ),
+                            )
+                            .await;
+                            continue;
+                        }
+
                         send_and_log(
                             event_tx, runs_dir, issue_id,
                             AgentEvent::TextDelta(
@@ -753,6 +767,7 @@ async fn run_pr_watch(
                         )
                         .await;
                         github.force_push_current_branch(working_dir).await?;
+                        rebase_attempts = 0;
                         send_and_log(
                             event_tx, runs_dir, issue_id,
                             AgentEvent::TextDelta(

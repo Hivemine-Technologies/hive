@@ -536,20 +536,18 @@ async fn story_phase_loop(
                     run.status = RunStatus::Complete;
 
                     // Cleanup worktree after PrWatch (PR merged or closed)
-                    if matches!(old_phase, Phase::PrWatch) {
-                        if run.worktree.is_some() {
-                            let repo_path = std::path::Path::new(&*config.repo_path);
-                            let worktree_dir = repo_path.join(&config.worktree_dir);
-                            match crate::git::worktree::remove_worktree(
-                                repo_path, &issue_id, &worktree_dir,
-                            ) {
-                                Ok(()) => tracing::info!("Cleaned up worktree for {issue_id}"),
-                                Err(e) => tracing::warn!(
-                                    "Failed to cleanup worktree for {issue_id}: {e}"
-                                ),
-                            }
-                            run.worktree = None;
+                    if matches!(old_phase, Phase::PrWatch) && run.worktree.is_some() {
+                        let repo_path = std::path::Path::new(&*config.repo_path);
+                        let worktree_dir = repo_path.join(&config.worktree_dir);
+                        match crate::git::worktree::remove_worktree(
+                            repo_path, &issue_id, &worktree_dir,
+                        ) {
+                            Ok(()) => tracing::info!("Cleaned up worktree for {issue_id}"),
+                            Err(e) => tracing::warn!(
+                                "Failed to cleanup worktree for {issue_id}: {e}"
+                            ),
                         }
+                        run.worktree = None;
                     }
 
                     send_notification_if_configured(
