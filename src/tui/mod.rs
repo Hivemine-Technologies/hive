@@ -332,47 +332,51 @@ impl Tui {
             },
             AgentFocus::LogPanel => match code {
                 KeyCode::Char('j') | KeyCode::Down => {
-                    if let Some(id) = &selected_issue_id {
-                        self.agents_state.scroll_log_down(id);
+                    if let Some(id) = selected_issue_id.as_ref() {
+                        self.agents_state.cursor_down(id);
                     }
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    if let Some(id) = &selected_issue_id {
-                        self.agents_state.scroll_log_up(id);
+                    if let Some(id) = selected_issue_id.as_ref() {
+                        self.agents_state.cursor_up(id);
                     }
                 }
                 KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(id) = selected_issue_id.as_ref() {
                         let h = self.agents_state.last_log_height as usize;
                         self.agents_state.half_page_down(id, h);
+                        self.agents_state.snap_cursor_to_viewport(id);
                     }
                 }
                 KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(id) = selected_issue_id.as_ref() {
                         let h = self.agents_state.last_log_height as usize;
                         self.agents_state.half_page_up(id, h);
+                        self.agents_state.snap_cursor_to_viewport(id);
                     }
                 }
                 KeyCode::PageDown => {
                     if let Some(id) = selected_issue_id.as_ref() {
                         let h = self.agents_state.last_log_height as usize;
                         self.agents_state.page_down(id, h);
+                        self.agents_state.snap_cursor_to_viewport(id);
                     }
                 }
                 KeyCode::PageUp => {
                     if let Some(id) = selected_issue_id.as_ref() {
                         let h = self.agents_state.last_log_height as usize;
                         self.agents_state.page_up(id, h);
+                        self.agents_state.snap_cursor_to_viewport(id);
                     }
                 }
                 KeyCode::Char('g') => {
-                    if let Some(id) = &selected_issue_id {
-                        self.agents_state.scroll_to_top(id);
+                    if let Some(id) = selected_issue_id.as_ref() {
+                        self.agents_state.cursor_to_top(id);
                     }
                 }
                 KeyCode::Char('G') => {
-                    if let Some(id) = &selected_issue_id {
-                        self.agents_state.scroll_to_bottom(id);
+                    if let Some(id) = selected_issue_id.as_ref() {
+                        self.agents_state.cursor_to_bottom(id);
                     }
                 }
                 KeyCode::Tab => self.agents_state.toggle_focus(),

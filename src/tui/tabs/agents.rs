@@ -28,6 +28,12 @@ pub struct AgentsState {
     /// None = use heuristic default; Some(bool) = user-pinned open/closed.
     pub fold_overrides: HashMap<String, HashMap<String, bool>>,
     pub last_log_height: u16,
+    /// Number of rendered lines the last render produced, per issue.
+    /// Scroll and cursor methods clamp against this instead of EntryBuffer::len().
+    pub last_rendered_lines: HashMap<String, usize>,
+    /// Cursor line index into the rendered-line list.
+    /// `usize::MAX` is a sentinel meaning "pin to the last line" (used on first append).
+    pub log_cursor: HashMap<String, usize>,
 }
 
 impl AgentsState {
@@ -39,6 +45,8 @@ impl AgentsState {
             log_scroll: HashMap::new(),
             fold_overrides: HashMap::new(),
             last_log_height: 0,
+            last_rendered_lines: HashMap::new(),
+            log_cursor: HashMap::new(),
         }
     }
 
@@ -49,6 +57,8 @@ impl AgentsState {
         self.log_scroll
             .entry(issue_id.to_string())
             .or_default();
+        self.last_rendered_lines.entry(issue_id.to_string()).or_insert(0);
+        self.log_cursor.entry(issue_id.to_string()).or_insert(usize::MAX);
     }
 
     pub fn append_entry(&mut self, issue_id: &str, entry: crate::tui::widgets::log_entry::LogEntry) {
@@ -76,14 +86,19 @@ impl AgentsState {
         };
     }
 
+    fn rendered_line_count(&self, issue_id: &str) -> usize {
+        self.last_rendered_lines.get(issue_id).copied().unwrap_or(0)
+    }
+
+    #[allow(dead_code)] // superseded by cursor_down; retained for potential Task 13 use
     pub fn scroll_log_down(&mut self, issue_id: &str) {
-        let Some(pos) = self.log_scroll.get_mut(issue_id) else { return };
-        let Some(buf) = self.log_buffers.get(issue_id) else { return };
+        let total = self.rendered_line_count(issue_id);
+        if total == 0 { return; }
         // When already at Tail, there's nothing below to scroll to.
+        let Some(pos) = self.log_scroll.get_mut(issue_id) else { return };
         if let ScrollPos::Offset(n) = *pos {
             let next = n + 1;
-            // Snap to Tail if we've caught up — better than "stuck one line below tail".
-            if next + 1 >= buf.len() {
+            if next + 1 >= total {
                 *pos = ScrollPos::Tail;
             } else {
                 *pos = ScrollPos::Offset(next);
@@ -91,17 +106,17 @@ impl AgentsState {
         }
     }
 
+    #[allow(dead_code)] // superseded by cursor_up; retained for potential Task 13 use
     pub fn scroll_log_up(&mut self, issue_id: &str) {
+        let total = self.rendered_line_count(issue_id);
         let Some(pos) = self.log_scroll.get_mut(issue_id) else { return };
-        let Some(buf) = self.log_buffers.get(issue_id) else { return };
         match *pos {
             ScrollPos::Tail => {
-                // Break out of follow mode at the penultimate line.
-                if buf.len() > 1 {
-                    *pos = ScrollPos::Offset(buf.len() - 2);
+                if total > 1 {
+                    *pos = ScrollPos::Offset(total - 2);
                 }
             }
-            ScrollPos::Offset(0) => { /* already at top */ }
+            ScrollPos::Offset(0) => {}
             ScrollPos::Offset(n) => *pos = ScrollPos::Offset(n - 1),
         }
     }
@@ -123,10 +138,9 @@ impl AgentsState {
     }
 
     fn scroll_by(&mut self, issue_id: &str, delta: isize) {
-        let Some(pos) = self.log_scroll.get_mut(issue_id) else { return };
-        let Some(buf) = self.log_buffers.get(issue_id) else { return };
-        let total = buf.len();
+        let total = self.rendered_line_count(issue_id);
         if total == 0 { return; }
+        let Some(pos) = self.log_scroll.get_mut(issue_id) else { return };
         let current = match *pos {
             ScrollPos::Tail => total.saturating_sub(1),
             ScrollPos::Offset(n) => n,
@@ -153,6 +167,75 @@ impl AgentsState {
         if let Some(pos) = self.log_scroll.get_mut(issue_id) {
             *pos = ScrollPos::Tail;
         }
+    }
+
+    /// Resolve the cursor to a concrete line index, handling the pin-to-last sentinel.
+    pub fn cursor_line(&self, issue_id: &str) -> usize {
+        let c = self.log_cursor.get(issue_id).copied().unwrap_or(0);
+        if c == usize::MAX {
+            self.rendered_line_count(issue_id).saturating_sub(1)
+        } else {
+            c
+        }
+    }
+
+    pub fn cursor_down(&mut self, issue_id: &str) {
+        let max = self.rendered_line_count(issue_id).saturating_sub(1);
+        let next = self.cursor_line(issue_id).saturating_add(1).min(max);
+        self.log_cursor.insert(issue_id.to_string(), next);
+        self.ensure_cursor_visible(issue_id);
+    }
+
+    pub fn cursor_up(&mut self, issue_id: &str) {
+        let next = self.cursor_line(issue_id).saturating_sub(1);
+        self.log_cursor.insert(issue_id.to_string(), next);
+        self.ensure_cursor_visible(issue_id);
+    }
+
+    pub fn cursor_to_top(&mut self, issue_id: &str) {
+        self.log_cursor.insert(issue_id.to_string(), 0);
+        self.scroll_to_top(issue_id);
+    }
+
+    pub fn cursor_to_bottom(&mut self, issue_id: &str) {
+        self.log_cursor.insert(issue_id.to_string(), usize::MAX);
+        self.scroll_to_bottom(issue_id);
+    }
+
+    /// If the cursor sits outside the current viewport, adjust ScrollPos so it's visible.
+    pub fn ensure_cursor_visible(&mut self, issue_id: &str) {
+        let cursor = self.cursor_line(issue_id);
+        let total = self.rendered_line_count(issue_id);
+        let view_height = self.last_log_height as usize;
+        if view_height == 0 || total == 0 { return; }
+        let start = match self.log_scroll.get(issue_id).copied().unwrap_or(ScrollPos::Tail) {
+            ScrollPos::Tail => total.saturating_sub(view_height),
+            ScrollPos::Offset(n) => n,
+        };
+        let end = start + view_height;
+        let new_pos = if cursor < start {
+            ScrollPos::Offset(cursor)
+        } else if cursor >= end {
+            let new_start = cursor.saturating_sub(view_height.saturating_sub(1));
+            if new_start + view_height >= total { ScrollPos::Tail } else { ScrollPos::Offset(new_start) }
+        } else {
+            return;
+        };
+        self.log_scroll.insert(issue_id.to_string(), new_pos);
+    }
+
+    /// After a viewport move (Ctrl-D/U, PageDown/Up), clamp the cursor into the new viewport.
+    pub fn snap_cursor_to_viewport(&mut self, issue_id: &str) {
+        let total = self.rendered_line_count(issue_id);
+        let view_height = self.last_log_height as usize;
+        if view_height == 0 || total == 0 { return; }
+        let start = match self.log_scroll.get(issue_id).copied().unwrap_or(ScrollPos::Tail) {
+            ScrollPos::Tail => total.saturating_sub(view_height),
+            ScrollPos::Offset(n) => n,
+        };
+        let end_inclusive = (start + view_height).min(total).saturating_sub(1);
+        let clamped = self.cursor_line(issue_id).clamp(start, end_inclusive);
+        self.log_cursor.insert(issue_id.to_string(), clamped);
     }
 
     // Consumed by Task 11/12/13 which wire fold toggle into rendering and keybindings
@@ -307,17 +390,23 @@ pub fn render(
 
         if let Some(buffer) = state.log_buffers.get(&run.issue_id) {
             let issue_id = run.issue_id.clone();
+            // cursor_line uses last_rendered_lines (cached from previous frame) to resolve
+            // the usize::MAX sentinel. On the first frame it returns 0, which is harmless —
+            // the highlight snaps to the right position next frame.
+            let cursor = Some(state.cursor_line(&issue_id));
             let overrides = state.fold_overrides.get(&issue_id).cloned().unwrap_or_default();
-            log_viewer::render_entries(
+            let rendered_count = log_viewer::render_entries(
                 frame,
                 log_area,
                 buffer,
                 scroll,
+                cursor,
                 "Output",
                 move |tool_use_id, default_folded| {
                     overrides.get(tool_use_id).copied().unwrap_or(default_folded)
                 },
             );
+            state.last_rendered_lines.insert(issue_id, rendered_count);
         } else {
             let empty = Paragraph::new("No output yet.")
                 .style(Style::default().fg(Color::DarkGray))
@@ -414,10 +503,11 @@ mod tests {
         for i in 0..10 {
             state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
         }
+        state.last_rendered_lines.insert("APX-1".to_string(), 10);
         // Move into manual mode one step from the bottom.
         state.log_scroll.insert("APX-1".to_string(), ScrollPos::Offset(8));
         state.scroll_log_down("APX-1");
-        // `next + 1 >= buf.len()` is true at Offset(9) so we snap back to Tail.
+        // `next + 1 >= total` is true at Offset(9) so we snap back to Tail.
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Tail);
     }
 
@@ -428,6 +518,7 @@ mod tests {
         for i in 0..5 {
             state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
         }
+        state.last_rendered_lines.insert("APX-1".to_string(), 5);
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Tail);
         state.scroll_log_up("APX-1");
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(3));
@@ -440,6 +531,7 @@ mod tests {
         for i in 0..5 {
             state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
         }
+        state.last_rendered_lines.insert("APX-1".to_string(), 5);
         state.scroll_to_top("APX-1");
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(0));
         state.scroll_log_up("APX-1");
@@ -453,6 +545,7 @@ mod tests {
         for i in 0..50 {
             state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
         }
+        state.last_rendered_lines.insert("APX-1".to_string(), 50);
         state.log_scroll.insert("APX-1".to_string(), ScrollPos::Offset(10));
         state.page_down("APX-1", 20);
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(30));
@@ -465,6 +558,7 @@ mod tests {
         for i in 0..10 {
             state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
         }
+        state.last_rendered_lines.insert("APX-1".to_string(), 10);
         state.log_scroll.insert("APX-1".to_string(), ScrollPos::Offset(5));
         state.page_down("APX-1", 100);
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Tail);
@@ -477,9 +571,58 @@ mod tests {
         for i in 0..50 {
             state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
         }
+        state.last_rendered_lines.insert("APX-1".to_string(), 50);
         // Tail → current is 49, page up by 20 → Offset(29)
         state.page_up("APX-1", 20);
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(29));
+    }
+
+    #[test]
+    fn test_cursor_down_advances_and_clamps() {
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        state.last_rendered_lines.insert("APX-1".to_string(), 10);
+        state.log_cursor.insert("APX-1".to_string(), 0);
+        state.last_log_height = 20;
+        state.cursor_down("APX-1");
+        assert_eq!(state.log_cursor["APX-1"], 1);
+        for _ in 0..20 { state.cursor_down("APX-1"); }
+        assert_eq!(state.log_cursor["APX-1"], 9);
+    }
+
+    #[test]
+    fn test_cursor_up_clamps_at_zero() {
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        state.last_rendered_lines.insert("APX-1".to_string(), 10);
+        state.log_cursor.insert("APX-1".to_string(), 2);
+        state.last_log_height = 20;
+        for _ in 0..10 { state.cursor_up("APX-1"); }
+        assert_eq!(state.log_cursor["APX-1"], 0);
+    }
+
+    #[test]
+    fn test_ensure_cursor_visible_scrolls_when_below_viewport() {
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        state.last_rendered_lines.insert("APX-1".to_string(), 100);
+        state.last_log_height = 10;
+        state.log_scroll.insert("APX-1".to_string(), ScrollPos::Offset(0));
+        state.log_cursor.insert("APX-1".to_string(), 50);
+        state.ensure_cursor_visible("APX-1");
+        assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(41));
+    }
+
+    #[test]
+    fn test_snap_cursor_to_viewport_clamps_into_visible_range() {
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        state.last_rendered_lines.insert("APX-1".to_string(), 100);
+        state.last_log_height = 10;
+        state.log_scroll.insert("APX-1".to_string(), ScrollPos::Offset(50));
+        state.log_cursor.insert("APX-1".to_string(), 5);
+        state.snap_cursor_to_viewport("APX-1");
+        assert_eq!(state.log_cursor["APX-1"], 50);
     }
 
     #[test]

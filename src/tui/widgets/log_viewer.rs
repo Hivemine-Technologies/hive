@@ -103,6 +103,7 @@ impl EntryBuffer {
         &self.entries
     }
 
+    #[allow(dead_code)] // Task 15 will clean up EntryBuffer; keeping until then
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -161,6 +162,7 @@ pub fn render_log(
     area: Rect,
     buffer: &LogBuffer,
     scroll: ScrollPos,
+    cursor: Option<usize>,
     title: &str,
 ) {
     if buffer.is_empty() {
@@ -197,8 +199,13 @@ pub fn render_log(
 
     let lines: Vec<Line> = all[start..end]
         .iter()
-        .map(|line| {
-            let style = line_style(line);
+        .enumerate()
+        .map(|(i, line)| {
+            let line_idx = start + i;
+            let mut style = line_style(line);
+            if cursor == Some(line_idx) {
+                style = style.bg(Color::Rgb(40, 40, 60));
+            }
             Line::from(Span::styled(line.as_str(), style))
         })
         .collect();
@@ -342,9 +349,11 @@ pub fn render_entries<F>(
     area: Rect,
     buffer: &EntryBuffer,
     scroll: ScrollPos,
+    cursor: Option<usize>,
     title: &str,
     is_folded: F,
-) where
+) -> usize
+where
     F: Fn(&str, bool) -> bool,
 {
     if buffer.is_empty() {
@@ -352,11 +361,13 @@ pub fn render_entries<F>(
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL).title(title.to_string()));
         frame.render_widget(empty, area);
-        return;
+        return 0;
     }
     let lines = flatten_entries_with_fold(buffer, is_folded);
+    let total = lines.len();
     let temp = LogBuffer::from_lines(lines, 5000);
-    render_log(frame, area, &temp, scroll, title);
+    render_log(frame, area, &temp, scroll, cursor, title);
+    total
 }
 
 #[cfg(test)]
