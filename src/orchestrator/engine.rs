@@ -798,8 +798,34 @@ async fn run_pr_watch(
                 }
             }
             PrStatus::Clean => {
-                // PR is clean or mergeability not yet computed — keep watching
-                continue;
+                // Check for unresolved bot review threads — if found, regress
+                // to BotReviews so they get handled properly
+                match github.list_unresolved_bot_threads(pr_number, &[]).await {
+                    Ok(threads) if !threads.is_empty() => {
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(format!(
+                                "[PR Watch] Found {} unresolved review thread(s). \
+                                 Regressing to Bot Reviews...\n",
+                                threads.len()
+                            )),
+                        )
+                        .await;
+                        return Ok(PhaseExecutionResult {
+                            outcome: PhaseOutcome::Regress {
+                                phase: Phase::BotReviews { cycle: 0 },
+                            },
+                            cost_usd: total_cost,
+                            session_id: None,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to check for unresolved threads on PR #{pr_number}: {e}"
+                        );
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -2073,6 +2099,102 @@ mod tests {
         assert!(
             matches!(result.outcome, PhaseOutcome::NeedsAttention { .. }),
             "expected NeedsAttention after exhausted CI fix attempts, got {:?}",
+            result.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_regresses_to_bot_reviews_on_unresolved_threads() {
+        // Clean PR status but unresolved bot threads → Regress to BotReviews
+        let github = MockGitHub::new();
+        github
+            .pr_status_responses
+            .lock()
+            .unwrap()
+            .push_back(PrStatus::Clean);
+        github
+            .unresolved_threads_responses
+            .lock()
+            .unwrap()
+            .push_back(vec!["thread-1".to_string(), "thread-2".to_string()]);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-REGRESS",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &MockGitOps::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(
+                result.outcome,
+                PhaseOutcome::Regress { phase: Phase::BotReviews { cycle: 0 } }
+            ),
+            "expected Regress to BotReviews, got {:?}",
+            result.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_no_regress_when_no_threads() {
+        // Clean PR status, no unresolved threads → keep watching → Merged
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Clean);
+            q.push_back(PrStatus::Merged);
+        }
+        // Empty threads response (no unresolved threads)
+        github
+            .unresolved_threads_responses
+            .lock()
+            .unwrap()
+            .push_back(vec![]);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-NO-REGRESS",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &MockGitOps::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success (merged), got {:?}",
             result.outcome
         );
     }

@@ -559,9 +559,30 @@ async fn story_phase_loop(
 
         // Handle outcome
         match phase_outcome {
+            PhaseOutcome::Regress { phase: target } => {
+                let old_phase = run.phase.clone();
+                run.regression_return = Some(old_phase.clone());
+                run.phase = target.clone();
+                run.updated_at = Utc::now();
+
+                let _ = event_tx
+                    .send(OrchestratorEvent::PhaseTransition {
+                        issue_id: issue_id.clone(),
+                        from: old_phase,
+                        to: target,
+                    })
+                    .await;
+            }
             PhaseOutcome::Success | PhaseOutcome::Skipped => {
                 let old_phase = run.phase.clone();
-                let next = advance(run.phase.clone(), &config.phases);
+
+                // If returning from a regression, jump back instead of advancing
+                let next = if let Some(return_phase) = run.regression_return.take() {
+                    return_phase
+                } else {
+                    advance(run.phase.clone(), &config.phases)
+                };
+
                 run.phase = next.clone();
                 run.updated_at = Utc::now();
 
