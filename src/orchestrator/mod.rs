@@ -475,12 +475,14 @@ async fn story_phase_loop(
                     &run.phase,
                     g.as_ref(),
                     tracker.as_ref(),
+                    runner.as_ref(),
                     &issue_id,
                     &issue_detail.title,
                     &issue_detail.description,
                     working_dir,
                     branch,
                     &config.github.default_branch,
+                    phase_config,
                     run.pr.as_ref(),
                     run.cost_usd,
                     run.started_at,
@@ -493,6 +495,7 @@ async fn story_phase_loop(
                 if let Some(pr) = result.pr {
                     run.pr = Some(pr);
                 }
+                run.cost_usd += result.cost_usd;
 
                 result.outcome
             } else {

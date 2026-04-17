@@ -941,21 +941,25 @@ pub async fn fix_cross_review_findings(
 pub struct DirectPhaseResult {
     pub outcome: PhaseOutcome,
     pub pr: Option<PrHandle>,
+    pub cost_usd: f64,
 }
 
 /// Execute a direct phase (RaisePr or Handoff).
 ///
-/// Direct phases perform actions via API calls with no agent involvement.
+/// Direct phases perform actions via API calls. RaisePr optionally spawns
+/// a short agent session to generate a structured PR body.
 pub async fn run_direct_phase(
     phase: &Phase,
     github: &GitHubClient,
     tracker: &dyn IssueTracker,
+    runner: &dyn AgentRunner,
     issue_id: &str,
     issue_title: &str,
     issue_description: &str,
     working_dir: &std::path::Path,
     branch: &str,
     default_branch: &str,
+    phase_config: Option<&PhaseConfig>,
     pr: Option<&PrHandle>,
     cost_usd: f64,
     started_at: chrono::DateTime<chrono::Utc>,
@@ -964,15 +968,18 @@ pub async fn run_direct_phase(
 ) -> Result<DirectPhaseResult> {
     match phase {
         Phase::RaisePr => {
+            let (_, model) = resolve_phase_runner_config(phase, phase_config);
             run_raise_pr(
                 github,
                 tracker,
+                runner,
                 issue_id,
                 issue_title,
                 issue_description,
                 working_dir,
                 branch,
                 default_branch,
+                model,
                 event_tx,
                 runs_dir,
             )
@@ -995,12 +1002,14 @@ pub async fn run_direct_phase(
 async fn run_raise_pr(
     github: &GitHubClient,
     tracker: &dyn IssueTracker,
+    runner: &dyn AgentRunner,
     issue_id: &str,
     issue_title: &str,
     issue_description: &str,
     working_dir: &std::path::Path,
     branch: &str,
     default_branch: &str,
+    model: Option<&str>,
     event_tx: &mpsc::Sender<OrchestratorEvent>,
     runs_dir: &Path,
 ) -> Result<DirectPhaseResult> {
@@ -1015,9 +1024,14 @@ async fn run_raise_pr(
 
     github.push_branch(working_dir, branch).await?;
 
-    // Create PR
+    // Generate PR body via agent (falls back to static template on failure)
+    let (body, body_cost) = generate_pr_body(
+        runner, issue_id, issue_title, issue_description,
+        working_dir, default_branch, model, event_tx, runs_dir,
+    )
+    .await;
+
     let title = format!("{issue_id}: {issue_title}");
-    let body = format!("## {issue_title}\n\n{issue_description}\n\n---\n*Automated by Hive*");
 
     send_and_log(
         event_tx,
@@ -1048,7 +1062,92 @@ async fn run_raise_pr(
     Ok(DirectPhaseResult {
         outcome: PhaseOutcome::Success,
         pr: Some(pr_handle),
+        cost_usd: body_cost,
     })
+}
+
+/// Generate a structured PR body using a short agent session.
+///
+/// Collects git data (diff stat, commit log), spawns an agent to write
+/// PR_BODY.md, then reads the file. Falls back to a static template
+/// if anything fails.
+async fn generate_pr_body(
+    runner: &dyn AgentRunner,
+    issue_id: &str,
+    issue_title: &str,
+    issue_description: &str,
+    working_dir: &std::path::Path,
+    default_branch: &str,
+    model: Option<&str>,
+    event_tx: &mpsc::Sender<OrchestratorEvent>,
+    runs_dir: &Path,
+) -> (String, f64) {
+    let fallback = format!(
+        "## {issue_title}\n\n{issue_description}\n\n---\n*Automated by Hive*"
+    );
+
+    // Collect git data
+    let log_output = std::process::Command::new("git")
+        .args(["log", "--oneline", &format!("origin/{default_branch}..HEAD")])
+        .current_dir(working_dir)
+        .output();
+    let log_text = log_output
+        .as_ref()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    let stat_output = std::process::Command::new("git")
+        .args(["diff", &format!("origin/{default_branch}...HEAD"), "--stat"])
+        .current_dir(working_dir)
+        .output();
+    let stat_text = stat_output
+        .as_ref()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    if log_text.is_empty() && stat_text.is_empty() {
+        return (fallback, 0.0);
+    }
+
+    send_and_log(
+        event_tx, runs_dir, issue_id,
+        AgentEvent::TextDelta("[Raise PR] Generating PR description...\n".to_string()),
+    )
+    .await;
+
+    let prompt = prompts::build_pr_body_prompt(
+        issue_id, issue_title, issue_description, &log_text, &stat_text,
+    );
+    let config = SessionConfig {
+        working_dir: working_dir.to_path_buf(),
+        system_prompt: prompt,
+        model: model.map(|s| s.to_string()),
+        permission_mode: None,
+    };
+
+    let result = run_fix_agent(runner, config, issue_id, event_tx, runs_dir).await;
+    let cost = result.as_ref().map(|r| r.cost_usd).unwrap_or(0.0);
+
+    // Read PR_BODY.md
+    let body_path = working_dir.join("PR_BODY.md");
+    match std::fs::read_to_string(&body_path) {
+        Ok(body) if !body.trim().is_empty() => {
+            let _ = std::fs::remove_file(&body_path);
+            send_and_log(
+                event_tx, runs_dir, issue_id,
+                AgentEvent::TextDelta(format!(
+                    "[Raise PR] PR description generated (cost: ${cost:.2})\n"
+                )),
+            )
+            .await;
+            (body, cost)
+        }
+        _ => {
+            tracing::warn!("PR_BODY.md missing or empty for {issue_id}, using fallback");
+            let _ = std::fs::remove_file(&body_path);
+            (fallback, cost)
+        }
+    }
 }
 
 async fn run_handoff(
@@ -1105,6 +1204,7 @@ async fn run_handoff(
     Ok(DirectPhaseResult {
         outcome: PhaseOutcome::Success,
         pr: None,
+        cost_usd: 0.0,
     })
 }
 

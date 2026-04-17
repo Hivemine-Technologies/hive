@@ -160,6 +160,37 @@ pub fn build_bot_review_fix_prompt(
     )
 }
 
+/// Build a prompt for an agent to generate a structured PR body.
+pub fn build_pr_body_prompt(
+    issue_id: &str,
+    issue_title: &str,
+    issue_description: &str,
+    git_log: &str,
+    git_diff_stat: &str,
+) -> String {
+    format!(
+        "You are generating a pull request description for story {issue_id}: {issue_title}.\n\n\
+         ## Issue Description\n{issue_description}\n\n\
+         ## Commits\n```\n{git_log}\n```\n\n\
+         ## Files Changed\n```\n{git_diff_stat}\n```\n\n\
+         ## Instructions\n\
+         Write a well-structured PR description in markdown and save it to `PR_BODY.md` \
+         in the current directory. Do NOT include any other files or changes.\n\n\
+         The PR body MUST include these sections:\n\
+         1. **Summary** — 3-5 bullet points describing what was implemented. Use inline \
+         `code` formatting for filenames, functions, types, and technical terms.\n\
+         2. **Files Changed** — a markdown table with columns: File | Change. One row \
+         per changed file, describing what changed in that file.\n\
+         3. **Test Plan** — a checklist with ✅ items showing what test coverage was added \
+         or verified. Include function/file names and rough coverage notes.\n\n\
+         If the changes implement business rules or domain logic, add a **Business Rules** \
+         section (numbered list) between Summary and Files Changed.\n\n\
+         Keep it concise but informative. A reviewer should understand what changed and \
+         why without reading the full diff.\n\n\
+         End with a horizontal rule and `*Automated by Hive*`."
+    )
+}
+
 /// Build a prompt for an agent to resolve merge conflicts via interactive rebase.
 pub fn build_rebase_conflict_prompt(
     issue_id: &str,
@@ -307,5 +338,24 @@ mod tests {
         assert!(prompt.contains("git rebase"));
         assert!(prompt.contains("rebase --continue"));
         assert!(prompt.contains("verification command"));
+    }
+
+    #[test]
+    fn test_pr_body_prompt() {
+        let prompt = build_pr_body_prompt(
+            "APX-245",
+            "Add NumberSequence",
+            "Create the service",
+            "abc123 feat(APX-245): add service",
+            " src/service.rs | 50 +",
+        );
+        assert!(prompt.contains("APX-245"));
+        assert!(prompt.contains("PR_BODY.md"));
+        assert!(prompt.contains("Summary"));
+        assert!(prompt.contains("Files Changed"));
+        assert!(prompt.contains("Test Plan"));
+        assert!(prompt.contains("Business Rules"));
+        assert!(prompt.contains("abc123"));
+        assert!(prompt.contains("service.rs"));
     }
 }
