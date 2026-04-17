@@ -139,10 +139,9 @@ impl GitHub for MockGitHub {
         Ok(())
     }
 
-    async fn list_unresolved_bot_threads(
+    async fn list_unresolved_review_threads(
         &self,
         _pr_number: u64,
-        _bot_authors: &[String],
     ) -> Result<Vec<String>> {
         Ok(self
             .unresolved_threads_responses

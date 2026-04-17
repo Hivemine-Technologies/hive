@@ -590,19 +590,12 @@ async fn run_bot_reviews(
             }
         }
 
-        // Resolve review threads via GraphQL
-        let bot_authors: Vec<String> = new_bot_comments
-            .iter()
-            .map(|c| c.author.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-
+        // Resolve every unresolved review thread via GraphQL. BotReviews
+        // handles all review feedback — bot or human — so after a fix cycle
+        // we clear the whole set rather than second-guessing which threads
+        // the fix agent addressed.
         let mut resolved_count = 0u32;
-        match github
-            .list_unresolved_bot_threads(pr_number, &bot_authors)
-            .await
-        {
+        match github.list_unresolved_review_threads(pr_number).await {
             Ok(thread_ids) => {
                 for tid in &thread_ids {
                     match github.resolve_review_thread(tid).await {
@@ -899,9 +892,9 @@ async fn run_pr_watch(
                 }
             }
             PrStatus::Clean => {
-                // Check for unresolved bot review threads — if found, regress
-                // to BotReviews so they get handled properly
-                match github.list_unresolved_bot_threads(pr_number, &[]).await {
+                // Check for any unresolved review threads — if found, regress
+                // to BotReviews so they get handled (bot or human).
+                match github.list_unresolved_review_threads(pr_number).await {
                     Ok(threads) if !threads.is_empty() => {
                         send_and_log(
                             event_tx, runs_dir, issue_id,

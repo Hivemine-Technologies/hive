@@ -17,7 +17,7 @@ pub trait GitHub: Send + Sync {
     async fn force_push_current_branch(&self, worktree_path: &std::path::Path) -> Result<()>;
     async fn post_pr_comment(&self, pr_number: u64, body: &str) -> Result<()>;
     async fn reply_to_inline_comment(&self, pr_number: u64, comment_id: u64, body: &str) -> Result<()>;
-    async fn list_unresolved_bot_threads(&self, pr_number: u64, bot_authors: &[String]) -> Result<Vec<String>>;
+    async fn list_unresolved_review_threads(&self, pr_number: u64) -> Result<Vec<String>>;
     async fn resolve_review_thread(&self, thread_id: &str) -> Result<()>;
 }
 
@@ -280,14 +280,14 @@ impl GitHub for GitHubClient {
         Ok(comments)
     }
 
-    /// Fetch unresolved review thread IDs for bot authors on a PR.
+    /// Fetch all unresolved review thread IDs on a PR, regardless of author.
+    ///
+    /// BotReviews handles any outstanding review thread — bot or human — so
+    /// we resolve every unresolved thread after a fix cycle. PrWatch uses
+    /// the same list to decide when to regress.
     ///
     /// Returns GraphQL node IDs that can be passed to `resolve_review_thread`.
-    async fn list_unresolved_bot_threads(
-        &self,
-        pr_number: u64,
-        bot_authors: &[String],
-    ) -> Result<Vec<String>> {
+    async fn list_unresolved_review_threads(&self, pr_number: u64) -> Result<Vec<String>> {
         let query = format!(
             r#"query {{
               repository(owner: "{}", name: "{}") {{
@@ -296,11 +296,6 @@ impl GitHub for GitHubClient {
                     nodes {{
                       id
                       isResolved
-                      comments(first: 1) {{
-                        nodes {{
-                          author {{ login }}
-                        }}
-                      }}
                     }}
                   }}
                 }}
@@ -333,17 +328,7 @@ impl GitHub for GitHubClient {
                     );
                 }
             }
-            let author = thread["comments"]["nodes"]
-                .as_array()
-                .and_then(|c| c.first())
-                .and_then(|c| c["author"]["login"].as_str())
-                .unwrap_or("");
-            let is_match = bot_authors.is_empty()
-                || bot_authors
-                    .iter()
-                    .any(|b| author.to_lowercase().contains(&b.to_lowercase()));
-            if is_match
-                && let Some(id) = thread["id"].as_str() {
+            if let Some(id) = thread["id"].as_str() {
                 thread_ids.push(id.to_string());
             }
         }
