@@ -89,6 +89,48 @@ impl AgentsState {
         }
     }
 
+    // Keybindings (Task 5) will wire these; allow dead_code until then.
+    #[allow(dead_code)]
+    pub fn page_down(&mut self, issue_id: &str, visible_height: usize) {
+        self.scroll_by(issue_id, visible_height as isize);
+    }
+
+    #[allow(dead_code)]
+    pub fn page_up(&mut self, issue_id: &str, visible_height: usize) {
+        self.scroll_by(issue_id, -(visible_height as isize));
+    }
+
+    #[allow(dead_code)]
+    pub fn half_page_down(&mut self, issue_id: &str, visible_height: usize) {
+        self.scroll_by(issue_id, (visible_height / 2) as isize);
+    }
+
+    #[allow(dead_code)]
+    pub fn half_page_up(&mut self, issue_id: &str, visible_height: usize) {
+        self.scroll_by(issue_id, -((visible_height / 2) as isize));
+    }
+
+    fn scroll_by(&mut self, issue_id: &str, delta: isize) {
+        let Some(pos) = self.log_scroll.get_mut(issue_id) else { return };
+        let Some(buf) = self.log_buffers.get(issue_id) else { return };
+        let total = buf.len();
+        if total == 0 { return; }
+        let current = match *pos {
+            ScrollPos::Tail => total.saturating_sub(1),
+            ScrollPos::Offset(n) => n,
+        };
+        let next = if delta >= 0 {
+            current.saturating_add(delta as usize)
+        } else {
+            current.saturating_sub((-delta) as usize)
+        };
+        *pos = if next >= total.saturating_sub(1) {
+            ScrollPos::Tail
+        } else {
+            ScrollPos::Offset(next)
+        };
+    }
+
     pub fn scroll_to_top(&mut self, issue_id: &str) {
         if let Some(pos) = self.log_scroll.get_mut(issue_id) {
             *pos = ScrollPos::Offset(0);
@@ -340,5 +382,35 @@ mod tests {
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(0));
         state.scroll_log_up("APX-1");
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(0));
+    }
+
+    #[test]
+    fn test_page_down_from_middle() {
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        for i in 0..50 { state.append_log("APX-1", format!("line {i}")); }
+        state.log_scroll.insert("APX-1".to_string(), ScrollPos::Offset(10));
+        state.page_down("APX-1", 20);
+        assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(30));
+    }
+
+    #[test]
+    fn test_page_down_clamps_to_tail() {
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        for i in 0..10 { state.append_log("APX-1", format!("line {i}")); }
+        state.log_scroll.insert("APX-1".to_string(), ScrollPos::Offset(5));
+        state.page_down("APX-1", 100);
+        assert_eq!(state.log_scroll["APX-1"], ScrollPos::Tail);
+    }
+
+    #[test]
+    fn test_page_up_from_tail() {
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        for i in 0..50 { state.append_log("APX-1", format!("line {i}")); }
+        // Tail → current is 49, page up by 20 → Offset(29)
+        state.page_up("APX-1", 20);
+        assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(29));
     }
 }
