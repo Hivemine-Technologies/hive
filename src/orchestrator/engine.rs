@@ -345,17 +345,19 @@ async fn run_ci_watch(
                     continue;
                 }
 
-                // Push fixes so CI picks them up
+                // Push fixes so CI picks them up. Force-with-lease is
+                // appropriate here: CiWatch owns this fix commit and the
+                // lease protects against stomping unexpected remote updates.
                 send_and_log(
                     event_tx,
                     runs_dir,
                     issue_id,
                     AgentEvent::TextDelta(
-                        "[CI Watch] Fix agent completed. Pushing fixes...\n".to_string(),
+                        "[CI Watch] Fix agent completed. Force-pushing fixes...\n".to_string(),
                     ),
                 )
                 .await;
-                github.push_current_branch(working_dir).await?;
+                github.force_push_current_branch(working_dir).await?;
 
                 send_and_log(
                     event_tx,
@@ -521,17 +523,20 @@ async fn run_bot_reviews(
             continue;
         }
 
-        // Push fixes so bot reviewers see updated code
+        // Push fixes so bot reviewers see updated code. Force-with-lease
+        // so a branch that diverged (e.g. stuck from a prior failed rebase)
+        // still advances, while the lease prevents clobbering unexpected
+        // remote commits. See A#3 retry for the stale-lease race path.
         send_and_log(
             event_tx,
             runs_dir,
             issue_id,
             AgentEvent::TextDelta(
-                "[Bot Reviews] Fix agent completed. Pushing fixes...\n".to_string(),
+                "[Bot Reviews] Fix agent completed. Force-pushing fixes...\n".to_string(),
             ),
         )
         .await;
-        github.push_current_branch(working_dir).await?;
+        github.force_push_current_branch(working_dir).await?;
 
         // Reply to each comment and post summary on the PR
         send_and_log(
@@ -1757,8 +1762,9 @@ mod tests {
             "expected Success after fail+pass, got {:?}",
             result.outcome
         );
-        // Fix agent completed → push_current_branch was called once
-        assert_eq!(*github.push_count.lock().unwrap(), 1);
+        // Fix agent completed → force_push_current_branch was called once
+        assert_eq!(*github.force_push_count.lock().unwrap(), 1);
+        assert_eq!(*github.push_count.lock().unwrap(), 0);
     }
 
     // -----------------------------------------------------------------------
