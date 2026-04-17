@@ -51,7 +51,6 @@ impl LogBuffer {
 
 /// Number of visible rows a line will occupy when rendered with `Wrap { trim: false }`.
 /// `width` is the interior width (area width minus left/right borders).
-#[allow(dead_code)] // integrated in Task 3
 pub(crate) fn rendered_rows(line: &str, width: u16) -> usize {
     if width == 0 {
         return 1;
@@ -66,6 +65,32 @@ pub(crate) fn rendered_rows(line: &str, width: u16) -> usize {
             chars.div_ceil(w)
         })
         .sum()
+}
+
+fn start_for_tail(lines: &[String], visible_height: usize, width: u16) -> usize {
+    // Walk backwards from the end, accumulating rendered rows, until we fill
+    // the viewport. Return the source-line index to start rendering from.
+    let mut rows = 0;
+    let mut i = lines.len();
+    while i > 0 && rows < visible_height {
+        i -= 1;
+        rows += rendered_rows(&lines[i], width);
+    }
+    // If we overshot visible_height, `i` is still the right start — the top
+    // line may be partially clipped by ratatui's renderer, which is fine.
+    i
+}
+
+fn line_style(line: &str) -> Style {
+    if line.starts_with('[') {
+        Style::default().fg(Color::Cyan)
+    } else if line.contains("error") || line.contains("Error") {
+        Style::default().fg(Color::Red)
+    } else if line.contains("warning") || line.contains("Warning") {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    }
 }
 
 pub fn render_log(
@@ -87,36 +112,39 @@ pub fn render_log(
         return;
     }
 
-    let visible_height = area.height.saturating_sub(2) as usize; // subtract borders
+    let visible_height = area.height.saturating_sub(2) as usize; // minus borders
+    let interior_width = area.width.saturating_sub(2); // minus borders
     let total = buffer.len();
+    let all = buffer.lines();
 
+    // Pick the start source-line index.
     let start = match scroll {
-        ScrollPos::Tail => total.saturating_sub(visible_height),
-        ScrollPos::Offset(n) => n.min(total.saturating_sub(visible_height)),
+        ScrollPos::Tail => start_for_tail(all, visible_height, interior_width),
+        ScrollPos::Offset(n) => n.min(total.saturating_sub(1)),
     };
 
-    let end = (start + visible_height).min(total);
+    // Consume rendered-row budget forward from `start` to find how many source
+    // lines we include.
+    let mut rows_used = 0;
+    let mut end = start;
+    while end < total && rows_used < visible_height {
+        rows_used += rendered_rows(&all[end], interior_width);
+        end += 1;
+    }
 
-    let lines: Vec<Line> = buffer.lines()[start..end]
+    let lines: Vec<Line> = all[start..end]
         .iter()
         .map(|line| {
-            let style = if line.starts_with('[') {
-                Style::default().fg(Color::Cyan)
-            } else if line.contains("error") || line.contains("Error") {
-                Style::default().fg(Color::Red)
-            } else if line.contains("warning") || line.contains("Warning") {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
-            };
+            let style = line_style(line);
             Line::from(Span::styled(line.as_str(), style))
         })
         .collect();
 
-    let scroll_indicator = if total > visible_height {
-        format!(" [{end}/{total}]")
-    } else {
-        String::new()
+    let scroll_indicator = match scroll {
+        ScrollPos::Tail => {
+            if total > visible_height { format!(" [{total}/{total}]") } else { String::new() }
+        }
+        ScrollPos::Offset(n) => format!(" [{}/{total}]", (n + 1).min(total)),
     };
 
     let log = Paragraph::new(lines)
@@ -184,5 +212,19 @@ mod tests {
     #[test]
     fn test_rendered_rows_embedded_newline() {
         assert_eq!(rendered_rows("a\nb", 80), 2);
+    }
+
+    #[test]
+    fn test_start_for_tail_fits_without_wrap() {
+        let lines: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
+        assert_eq!(start_for_tail(&lines, 5, 80), 5);
+    }
+
+    #[test]
+    fn test_start_for_tail_with_wrapping_lines() {
+        // 3 lines of width 160, viewport 80 wide → each takes 2 rendered rows.
+        // Viewport height 4 fits 2 lines, so start should be lines.len() - 2.
+        let lines: Vec<String> = (0..3).map(|_| "x".repeat(160)).collect();
+        assert_eq!(start_for_tail(&lines, 4, 80), 1);
     }
 }
