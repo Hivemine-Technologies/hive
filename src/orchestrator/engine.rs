@@ -1210,8 +1210,128 @@ async fn run_handoff(
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use futures::Stream;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
     use crate::config::PhaseConfig;
+    use crate::domain::{AgentEvent, Issue, IssueDetail, IssueFilters};
+    use crate::domain::story_run::PrHandle;
+    use crate::git::github::{CiStatus, PrStatus};
+    use crate::git::mock_github::MockGitHub;
+    use crate::runners::{AgentRunner, SessionConfig, SessionHandle};
+    use crate::trackers::IssueTracker;
+
+    // -----------------------------------------------------------------------
+    // MockRunner
+    // -----------------------------------------------------------------------
+
+    struct MockRunner {
+        /// Events to emit from output_stream (per session, in order).
+        /// Each call to output_stream pops the front item; if empty, emits Complete.
+        sessions: Mutex<std::collections::VecDeque<Vec<AgentEvent>>>,
+    }
+
+    impl MockRunner {
+        fn new() -> Self {
+            Self {
+                sessions: Mutex::new(std::collections::VecDeque::new()),
+            }
+        }
+
+        /// Queue a sequence of events for the next session.
+        fn push_session_events(&self, events: Vec<AgentEvent>) {
+            self.sessions.lock().unwrap().push_back(events);
+        }
+    }
+
+    #[async_trait]
+    impl AgentRunner for MockRunner {
+        async fn start_session(&self, _config: SessionConfig) -> crate::error::Result<SessionHandle> {
+            Ok(SessionHandle {
+                session_id: "test-session-id".to_string(),
+            })
+        }
+
+        fn output_stream(
+            &self,
+            _session: &SessionHandle,
+        ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send>> {
+            let events = self
+                .sessions
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| vec![AgentEvent::Complete { cost_usd: 0.0 }]);
+            Box::pin(futures::stream::iter(events))
+        }
+
+        async fn cancel(&self, _session: &SessionHandle) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // MockTracker
+    // -----------------------------------------------------------------------
+
+    struct MockTracker;
+
+    #[async_trait]
+    impl IssueTracker for MockTracker {
+        async fn list_ready(&self, _filters: &IssueFilters) -> crate::error::Result<Vec<Issue>> {
+            Ok(vec![])
+        }
+
+        async fn start_issue(&self, _id: &str) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn finish_issue(&self, _id: &str) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn get_issue(&self, id: &str) -> crate::error::Result<IssueDetail> {
+            Ok(IssueDetail {
+                id: id.to_string(),
+                title: "Test Issue".to_string(),
+                description: "Test description".to_string(),
+                acceptance_criteria: None,
+                priority: None,
+                labels: vec![],
+                url: format!("https://example.com/issues/{id}"),
+            })
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn short_poll_config() -> PhaseConfig {
+        PhaseConfig {
+            enabled: true,
+            runner: None,
+            model: None,
+            max_attempts: None,
+            poll_interval: Some("1s".to_string()),
+            max_fix_attempts: Some(3),
+            max_fix_cycles: Some(3),
+            fix_runner: None,
+            fix_model: None,
+            wait_for: None,
+        }
+    }
+
+    fn make_channel() -> mpsc::Sender<OrchestratorEvent> {
+        let (tx, _rx) = mpsc::channel(64);
+        tx
+    }
 
     fn test_phase_config(enabled: bool) -> PhaseConfig {
         PhaseConfig {
@@ -1226,6 +1346,407 @@ mod tests {
             fix_model: None,
             wait_for: None,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // PR Watch tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_pr_watch_merged() {
+        let github = MockGitHub::new();
+        github
+            .pr_status_responses
+            .lock()
+            .unwrap()
+            .push_back(PrStatus::Merged);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-1",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+        assert_eq!(*github.force_push_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_closed() {
+        let github = MockGitHub::new();
+        github
+            .pr_status_responses
+            .lock()
+            .unwrap()
+            .push_back(PrStatus::Closed);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-2",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+        assert_eq!(*github.force_push_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_clean_stays_watching() {
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Clean);
+            q.push_back(PrStatus::Merged);
+        }
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-3",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success after Clean+Merged, got {:?}",
+            result.outcome
+        );
+        assert_eq!(*github.force_push_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_conflicts_triggers_force_push() {
+        // rebase_worktree will fail (no real git repo) → RebaseResult::Failed
+        // → logs and continues. Next poll returns Merged → Success.
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::Conflicts);
+            q.push_back(PrStatus::Merged);
+        }
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-4",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success after Conflicts+Merged, got {:?}",
+            result.outcome
+        );
+        // Rebase failed (no real git) so no force push occurred
+        assert_eq!(*github.force_push_count.lock().unwrap(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // CI Watch tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_ci_watch_passes() {
+        let github = MockGitHub::new();
+        github
+            .ci_status_responses
+            .lock()
+            .unwrap()
+            .push_back(CiStatus::Passed);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_ci_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-5",
+            "Test Issue",
+            working_dir.path(),
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ci_watch_fails_then_passes() {
+        let github = MockGitHub::new();
+        {
+            let mut q = github.ci_status_responses.lock().unwrap();
+            q.push_back(CiStatus::Failed {
+                failures: vec!["lint".to_string()],
+            });
+            q.push_back(CiStatus::Passed);
+        }
+
+        // Queue one session for the fix agent
+        let runner = MockRunner::new();
+        runner.push_session_events(vec![AgentEvent::Complete { cost_usd: 0.5 }]);
+
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_ci_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-6",
+            "Test Issue",
+            working_dir.path(),
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success after fail+pass, got {:?}",
+            result.outcome
+        );
+        // Fix agent completed → push_current_branch was called once
+        assert_eq!(*github.push_count.lock().unwrap(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Raise PR / Handoff direct phase tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_raise_pr_creates_draft() {
+        let github = MockGitHub::new();
+        let tracker = MockTracker;
+        // MockRunner: generate_pr_body will call git log/diff which yields empty
+        // output (no real git) so the fallback is used — no agent session needed.
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+
+        let result = run_direct_phase(
+            &Phase::RaisePr,
+            &github,
+            &tracker,
+            &runner,
+            "TEST-7",
+            "Create feature",
+            "Feature description",
+            working_dir.path(),
+            "TEST-7/create-feature",
+            "main",
+            None,
+            None,
+            0.0,
+            chrono::Utc::now(),
+            &event_tx,
+            runs_dir.path(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+        assert_eq!(
+            github.pushed_branches.lock().unwrap().len(),
+            1,
+            "expected one branch push"
+        );
+        assert_eq!(
+            github.created_prs.lock().unwrap().len(),
+            1,
+            "expected one PR created"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handoff_posts_summary() {
+        let github = MockGitHub::new();
+        let tracker = MockTracker;
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+
+        let pr = PrHandle {
+            number: 1,
+            url: "https://github.com/test/repo/pull/1".to_string(),
+            head_sha: "abc123".to_string(),
+        };
+
+        let result = run_direct_phase(
+            &Phase::Handoff,
+            &github,
+            &tracker,
+            &runner,
+            "TEST-8",
+            "Test handoff",
+            "Test description",
+            working_dir.path(),
+            "TEST-8/branch",
+            "main",
+            None,
+            Some(&pr),
+            1.23,
+            chrono::Utc::now(),
+            &event_tx,
+            runs_dir.path(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+
+        let comments = github.posted_comments.lock().unwrap();
+        assert_eq!(comments.len(), 1, "expected one comment posted");
+        assert!(
+            comments[0].1.contains("Hive Summary"),
+            "comment should contain 'Hive Summary', got: {}",
+            comments[0].1
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Bot Reviews tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_bot_reviews_no_comments_completes() {
+        let github = MockGitHub::new();
+        // Two empty polls → quiet_polls reaches 2 → done
+        {
+            let mut q = github.review_responses.lock().unwrap();
+            q.push_back(vec![]);
+            q.push_back(vec![]);
+        }
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_bot_reviews(
+            &github,
+            &runner,
+            1,
+            "TEST-9",
+            "Test Issue",
+            working_dir.path(),
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success after 2 quiet polls, got {:?}",
+            result.outcome
+        );
     }
 
     #[test]
