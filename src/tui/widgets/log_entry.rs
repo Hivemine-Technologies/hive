@@ -82,4 +82,42 @@ mod tests {
         };
         assert!(e.is_error());
     }
+
+    #[test]
+    fn test_body_line_count_marker() {
+        assert_eq!(LogEntry::Marker("a\nb".into()).body_line_count(), 2);
+    }
+
+    #[test]
+    fn test_body_line_count_tool_complete() {
+        let entry = LogEntry::Tool {
+            tool_use_id: "id1".into(),
+            tool: "Bash".into(),
+            input: "{}".into(),
+            result: Some(ToolResult {
+                output: "line1\nline2\nline3".into(),
+                is_error: false,
+                duration_ms: 42,
+            }),
+            started_at: Instant::now(),
+        };
+        assert_eq!(entry.body_line_count(), 3);
+    }
+
+    #[test]
+    fn test_is_error_false_for_text() {
+        assert!(!LogEntry::Text("hi".into()).is_error());
+    }
+
+    #[test]
+    fn test_is_error_false_for_successful_tool() {
+        let entry = LogEntry::Tool {
+            tool_use_id: "id1".into(),
+            tool: "Bash".into(),
+            input: "{}".into(),
+            result: Some(ToolResult { output: "ok".into(), is_error: false, duration_ms: 1 }),
+            started_at: Instant::now(),
+        };
+        assert!(!entry.is_error());
+    }
 }
