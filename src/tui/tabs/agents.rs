@@ -262,6 +262,59 @@ impl AgentsState {
             .and_then(|m| m.get(tool_use_id).copied())
             .unwrap_or(default_folded)
     }
+
+    /// Move the cursor to the next tool-use entry after the current cursor position.
+    ///
+    /// Note: line offsets are computed using *unfolded* counts (full body lines).
+    /// When folds are active the rendered cursor space may diverge from these counts;
+    /// this is an acceptable v1 simplification — folds are the exception, not the rule.
+    pub fn jump_next_tool(&mut self, issue_id: &str) {
+        use crate::tui::widgets::log_entry::LogEntry;
+        let Some(buf) = self.log_buffers.get(issue_id) else { return };
+        let current = self.cursor_line(issue_id);
+        let mut line = 0;
+        for entry in buf.entries() {
+            if line > current && matches!(entry, LogEntry::Tool { .. }) {
+                self.log_cursor.insert(issue_id.to_string(), line);
+                self.ensure_cursor_visible(issue_id);
+                return;
+            }
+            line += match entry {
+                LogEntry::Text(s) => s.lines().count().max(1),
+                LogEntry::Marker(_) => 1,
+                LogEntry::Tool { result, .. } => {
+                    1 + result.as_ref().map(|r| r.output.lines().count()).unwrap_or(0)
+                }
+            };
+        }
+    }
+
+    /// Move the cursor to the last tool-use entry before the current cursor position.
+    ///
+    /// Note: same fold-state caveat as `jump_next_tool`.
+    pub fn jump_prev_tool(&mut self, issue_id: &str) {
+        use crate::tui::widgets::log_entry::LogEntry;
+        let Some(buf) = self.log_buffers.get(issue_id) else { return };
+        let current = self.cursor_line(issue_id);
+        let mut line = 0;
+        let mut last_tool = None;
+        for entry in buf.entries() {
+            if matches!(entry, LogEntry::Tool { .. }) && line < current {
+                last_tool = Some(line);
+            }
+            line += match entry {
+                LogEntry::Text(s) => s.lines().count().max(1),
+                LogEntry::Marker(_) => 1,
+                LogEntry::Tool { result, .. } => {
+                    1 + result.as_ref().map(|r| r.output.lines().count()).unwrap_or(0)
+                }
+            };
+        }
+        if let Some(l) = last_tool {
+            self.log_cursor.insert(issue_id.to_string(), l);
+            self.ensure_cursor_visible(issue_id);
+        }
+    }
 }
 
 fn status_color(status: &RunStatus) -> Color {
@@ -429,6 +482,8 @@ pub fn render(
             Span::raw(" top/bot  "),
             Span::styled("Enter", Style::default().fg(Color::Cyan)),
             Span::raw(" fold  "),
+            Span::styled("]/[", Style::default().fg(Color::Cyan)),
+            Span::raw(" tool  "),
             Span::styled("c", Style::default().fg(Color::Cyan)),
             Span::raw(" cancel  "),
             Span::styled("o", Style::default().fg(Color::Cyan)),
@@ -622,6 +677,39 @@ mod tests {
         state.log_cursor.insert("APX-1".to_string(), 5);
         state.snap_cursor_to_viewport("APX-1");
         assert_eq!(state.log_cursor["APX-1"], 50);
+    }
+
+    #[test]
+    fn test_jump_next_tool_moves_cursor_to_next_tool() {
+        use crate::tui::widgets::log_entry::{LogEntry, ToolResult};
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        let buf = state.log_buffers.get_mut("APX-1").unwrap();
+        buf.push(LogEntry::Text("intro".into()));
+        buf.push(LogEntry::Tool {
+            tool_use_id: "t1".into(),
+            tool: "Bash".into(),
+            input: "ls".into(),
+            result: Some(ToolResult { output: "ok".into(), is_error: false, duration_ms: 1 }),
+            started_at: std::time::Instant::now(),
+        });
+        buf.push(LogEntry::Text("mid".into()));
+        buf.push(LogEntry::Tool {
+            tool_use_id: "t2".into(),
+            tool: "Read".into(),
+            input: "f".into(),
+            result: None,
+            started_at: std::time::Instant::now(),
+        });
+        // Expected rendered-line layout (all unfolded): line 0 intro, 1 t1 header, 2 t1 body "ok",
+        // 3 "mid", 4 t2 header. Total 5.
+        state.last_rendered_lines.insert("APX-1".to_string(), 5);
+        state.last_log_height = 10;
+        state.log_cursor.insert("APX-1".to_string(), 0);
+        state.jump_next_tool("APX-1");
+        assert_eq!(state.log_cursor["APX-1"], 1); // t1 header
+        state.jump_next_tool("APX-1");
+        assert_eq!(state.log_cursor["APX-1"], 4); // t2 header
     }
 
     #[test]

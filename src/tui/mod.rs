@@ -393,6 +393,16 @@ impl Tui {
                         }
                     }
                 }
+                KeyCode::Char(']') => {
+                    if let Some(id) = selected_issue_id.as_ref() {
+                        self.agents_state.jump_next_tool(id);
+                    }
+                }
+                KeyCode::Char('[') => {
+                    if let Some(id) = selected_issue_id.as_ref() {
+                        self.agents_state.jump_prev_tool(id);
+                    }
+                }
                 KeyCode::Tab => self.agents_state.toggle_focus(),
                 _ => {}
             },
