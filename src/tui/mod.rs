@@ -583,37 +583,72 @@ impl Tui {
                 }
             }
             OrchestratorEvent::AgentOutput { issue_id, event } => {
-                let line = match &event {
-                    AgentEvent::TextDelta(text) => text.clone(),
-                    AgentEvent::ToolUse { tool, input, .. } => {
-                        let preview = if input.len() > 120 {
-                            format!("{}...", &input[..120])
-                        } else {
-                            input.clone()
-                        };
-                        format!("[tool] {tool}: {preview}")
+                use crate::tui::widgets::log_entry::{LogEntry, ToolResult};
+                match event {
+                    AgentEvent::TextDelta(text) => {
+                        self.agents_state.append_entry(&issue_id, LogEntry::Text(text));
                     }
-                    AgentEvent::ToolResult { output, is_error, .. } => {
-                        let marker = if *is_error { "✗" } else { "✓" };
-                        format!("[tool-result {marker}] {output}")
+                    AgentEvent::ToolUse { tool_use_id, tool, input } => {
+                        self.agents_state.append_entry(
+                            &issue_id,
+                            LogEntry::Tool {
+                                tool_use_id,
+                                tool,
+                                input,
+                                result: None,
+                                started_at: std::time::Instant::now(),
+                            },
+                        );
+                    }
+                    AgentEvent::ToolResult { tool_use_id, output, is_error } => {
+                        // Compute duration_ms from the matching ToolUse's started_at.
+                        if let Some(buf) = self.agents_state.log_buffers.get(&issue_id) {
+                            let now = std::time::Instant::now();
+                            let duration_ms = buf
+                                .entries()
+                                .iter()
+                                .rev()
+                                .find_map(|e| match e {
+                                    LogEntry::Tool {
+                                        tool_use_id: id,
+                                        started_at,
+                                        ..
+                                    } if id == &tool_use_id => {
+                                        Some(now.duration_since(*started_at).as_millis() as u64)
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or(0);
+                            self.agents_state.attach_tool_result(
+                                &issue_id,
+                                &tool_use_id,
+                                ToolResult {
+                                    output,
+                                    is_error,
+                                    duration_ms,
+                                },
+                            );
+                        }
                     }
                     AgentEvent::Error(msg) => {
                         self.notify(format!("{issue_id}: {msg}"));
-                        format!("[ERROR] {msg}")
+                        self.agents_state
+                            .append_entry(&issue_id, LogEntry::Text(format!("[error] {msg}")));
                     }
                     AgentEvent::Complete { cost_usd } => {
-                        format!("[complete] cost: ${cost_usd:.2}")
+                        self.agents_state.append_entry(
+                            &issue_id,
+                            LogEntry::Marker(format!("complete · ${cost_usd:.4}")),
+                        );
                     }
-                };
-                self.agents_state.append_log(&issue_id, line);
+                }
             }
-            OrchestratorEvent::PhaseTransition {
-                issue_id,
-                from,
-                to,
-            } => {
-                self.agents_state
-                    .append_log(&issue_id, format!("--- Phase: {from} -> {to} ---"));
+            OrchestratorEvent::PhaseTransition { issue_id, from, to } => {
+                use crate::tui::widgets::log_entry::LogEntry;
+                self.agents_state.append_entry(
+                    &issue_id,
+                    LogEntry::Marker(format!("Phase: {from} -> {to}")),
+                );
             }
         }
     }

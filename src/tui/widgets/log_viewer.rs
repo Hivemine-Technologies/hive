@@ -6,6 +6,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::tui::widgets::log_entry::{LogEntry, ToolResult};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScrollPos {
     /// Follow the tail — always show the newest content.
@@ -15,11 +17,13 @@ pub enum ScrollPos {
     Offset(usize),
 }
 
+#[allow(dead_code)] // Task 15 will remove this bridge; keeping new/push for now
 pub struct LogBuffer {
     lines: Vec<String>,
     max_lines: usize,
 }
 
+#[allow(dead_code)] // Task 15 removes the bridge; keeping new/push until then
 impl LogBuffer {
     pub fn new(max_lines: usize) -> Self {
         Self {
@@ -47,6 +51,65 @@ impl LogBuffer {
         self.lines.is_empty()
     }
 
+    pub(crate) fn from_lines(lines: Vec<String>, max_lines: usize) -> Self {
+        Self { lines, max_lines }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EntryBuffer — structured log storage (Task 9+)
+// ---------------------------------------------------------------------------
+
+pub struct EntryBuffer {
+    entries: Vec<LogEntry>,
+    max_entries: usize,
+}
+
+impl EntryBuffer {
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            max_entries,
+        }
+    }
+
+    pub fn push(&mut self, entry: LogEntry) {
+        self.entries.push(entry);
+        if self.entries.len() > self.max_entries {
+            self.entries.remove(0);
+        }
+    }
+
+    /// Attach a tool_result to the most recent matching ToolUse entry.
+    /// Returns true if a match was found.
+    pub fn attach_result(&mut self, tool_use_id: &str, result: ToolResult) -> bool {
+        for entry in self.entries.iter_mut().rev() {
+            if let LogEntry::Tool {
+                tool_use_id: id,
+                result: slot,
+                ..
+            } = entry
+                && id == tool_use_id
+                && slot.is_none()
+            {
+                *slot = Some(result);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn entries(&self) -> &[LogEntry] {
+        &self.entries
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// Number of visible rows a line will occupy when rendered with `Wrap { trim: false }`.
@@ -165,6 +228,70 @@ pub fn render_log(
     frame.render_widget(log, area);
 }
 
+// ---------------------------------------------------------------------------
+// Bridge helpers: EntryBuffer → flatten → LogBuffer → render_log (Task 15 removes)
+// ---------------------------------------------------------------------------
+
+/// Flatten EntryBuffer to lines for the (still flat) renderer. Phase 3 replaces this.
+pub fn flatten_entries(buf: &EntryBuffer) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in buf.entries() {
+        match entry {
+            LogEntry::Text(s) => {
+                for line in s.lines() {
+                    out.push(line.to_string());
+                }
+            }
+            LogEntry::Marker(s) => out.push(format!("[{s}]")),
+            LogEntry::Tool {
+                tool,
+                input,
+                result,
+                ..
+            } => {
+                let preview = if input.chars().count() > 120 {
+                    let safe_end = input
+                        .char_indices()
+                        .nth(120)
+                        .map(|(i, _)| i)
+                        .unwrap_or(input.len());
+                    format!("{}...", &input[..safe_end])
+                } else {
+                    input.clone()
+                };
+                out.push(format!("→ {tool}: {preview}"));
+                if let Some(r) = result {
+                    let status = if r.is_error { "✗" } else { "✓" };
+                    out.push(format!("  {status} ({}ms)", r.duration_ms));
+                    for line in r.output.lines() {
+                        out.push(format!("    {line}"));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn render_entries(
+    frame: &mut Frame,
+    area: Rect,
+    buffer: &EntryBuffer,
+    scroll: ScrollPos,
+    title: &str,
+) {
+    if buffer.is_empty() {
+        let empty = Paragraph::new("No output yet.")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL).title(title.to_string()));
+        frame.render_widget(empty, area);
+        return;
+    }
+    let lines = flatten_entries(buffer);
+    let temp = LogBuffer::from_lines(lines, 5000);
+    render_log(frame, area, &temp, scroll, title);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +360,60 @@ mod tests {
         // Viewport height 4 fits 2 lines, so start should be lines.len() - 2.
         let lines: Vec<String> = (0..3).map(|_| "x".repeat(160)).collect();
         assert_eq!(start_for_tail(&lines, 4, 80), 1);
+    }
+
+    #[test]
+    fn test_entry_buffer_attach_result() {
+        use crate::tui::widgets::log_entry::{LogEntry, ToolResult};
+        let mut buf = EntryBuffer::new(100);
+        buf.push(LogEntry::Tool {
+            tool_use_id: "toolu_01".into(),
+            tool: "Bash".into(),
+            input: "{}".into(),
+            result: None,
+            started_at: std::time::Instant::now(),
+        });
+        let attached = buf.attach_result(
+            "toolu_01",
+            ToolResult {
+                output: "ok".into(),
+                is_error: false,
+                duration_ms: 42,
+            },
+        );
+        assert!(attached);
+        match &buf.entries()[0] {
+            LogEntry::Tool { result: Some(r), .. } => {
+                assert_eq!(r.duration_ms, 42);
+                assert!(!r.is_error);
+            }
+            _ => panic!("expected attached result"),
+        }
+    }
+
+    #[test]
+    fn test_entry_buffer_attach_ignores_already_filled() {
+        use crate::tui::widgets::log_entry::{LogEntry, ToolResult};
+        let mut buf = EntryBuffer::new(100);
+        buf.push(LogEntry::Tool {
+            tool_use_id: "toolu_01".into(),
+            tool: "Bash".into(),
+            input: "{}".into(),
+            result: Some(ToolResult {
+                output: "first".into(),
+                is_error: false,
+                duration_ms: 1,
+            }),
+            started_at: std::time::Instant::now(),
+        });
+        let attached = buf.attach_result(
+            "toolu_01",
+            ToolResult {
+                output: "second".into(),
+                is_error: true,
+                duration_ms: 2,
+            },
+        );
+        assert!(!attached);
     }
 }

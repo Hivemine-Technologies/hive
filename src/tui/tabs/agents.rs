@@ -22,7 +22,7 @@ pub use crate::tui::widgets::log_viewer::ScrollPos;
 pub struct AgentsState {
     pub selected: usize,
     pub focus: AgentFocus,
-    pub log_buffers: HashMap<String, log_viewer::LogBuffer>,
+    pub log_buffers: HashMap<String, log_viewer::EntryBuffer>,
     pub log_scroll: HashMap<String, ScrollPos>,
     pub last_log_height: u16,
 }
@@ -41,16 +41,27 @@ impl AgentsState {
     pub fn ensure_buffer(&mut self, issue_id: &str) {
         self.log_buffers
             .entry(issue_id.to_string())
-            .or_insert_with(|| log_viewer::LogBuffer::new(5000));
+            .or_insert_with(|| log_viewer::EntryBuffer::new(5000));
         self.log_scroll
             .entry(issue_id.to_string())
             .or_default();
     }
 
-    pub fn append_log(&mut self, issue_id: &str, line: String) {
+    pub fn append_entry(&mut self, issue_id: &str, entry: crate::tui::widgets::log_entry::LogEntry) {
         self.ensure_buffer(issue_id);
         if let Some(buf) = self.log_buffers.get_mut(issue_id) {
-            buf.push(line);
+            buf.push(entry);
+        }
+    }
+
+    pub fn attach_tool_result(
+        &mut self,
+        issue_id: &str,
+        tool_use_id: &str,
+        result: crate::tui::widgets::log_entry::ToolResult,
+    ) {
+        if let Some(buf) = self.log_buffers.get_mut(issue_id) {
+            buf.attach_result(tool_use_id, result);
         }
     }
 
@@ -263,7 +274,7 @@ pub fn render(
             .unwrap_or(ScrollPos::Tail);
 
         if let Some(buffer) = state.log_buffers.get(&run.issue_id) {
-            log_viewer::render_log(frame, log_area, buffer, scroll, "Output");
+            log_viewer::render_entries(frame, log_area, buffer, scroll, "Output");
         } else {
             let empty = Paragraph::new("No output yet.")
                 .style(Style::default().fg(Color::DarkGray))
@@ -305,6 +316,7 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::widgets::log_entry::LogEntry;
 
     #[test]
     fn test_agents_state_new() {
@@ -323,9 +335,9 @@ mod tests {
     }
 
     #[test]
-    fn test_append_log() {
+    fn test_append_entry_text() {
         let mut state = AgentsState::new();
-        state.append_log("APX-1", "hello".to_string());
+        state.append_entry("APX-1", LogEntry::Text("hello".into()));
         assert_eq!(state.log_buffers["APX-1"].len(), 1);
     }
 
@@ -344,7 +356,7 @@ mod tests {
         let mut state = AgentsState::new();
         state.ensure_buffer("APX-1");
         for i in 0..100 {
-            state.append_log("APX-1", format!("line {i}"));
+            state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
         }
         state.scroll_to_top("APX-1");
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(0));
@@ -357,7 +369,7 @@ mod tests {
         let mut state = AgentsState::new();
         state.ensure_buffer("APX-1");
         for i in 0..10 {
-            state.append_log("APX-1", format!("line {i}"));
+            state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
         }
         // Move into manual mode one step from the bottom.
         state.log_scroll.insert("APX-1".to_string(), ScrollPos::Offset(8));
@@ -371,7 +383,7 @@ mod tests {
         let mut state = AgentsState::new();
         state.ensure_buffer("APX-1");
         for i in 0..5 {
-            state.append_log("APX-1", format!("line {i}"));
+            state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
         }
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Tail);
         state.scroll_log_up("APX-1");
@@ -382,7 +394,9 @@ mod tests {
     fn test_scroll_up_at_top_is_noop() {
         let mut state = AgentsState::new();
         state.ensure_buffer("APX-1");
-        for i in 0..5 { state.append_log("APX-1", format!("line {i}")); }
+        for i in 0..5 {
+            state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
+        }
         state.scroll_to_top("APX-1");
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(0));
         state.scroll_log_up("APX-1");
@@ -393,7 +407,9 @@ mod tests {
     fn test_page_down_from_middle() {
         let mut state = AgentsState::new();
         state.ensure_buffer("APX-1");
-        for i in 0..50 { state.append_log("APX-1", format!("line {i}")); }
+        for i in 0..50 {
+            state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
+        }
         state.log_scroll.insert("APX-1".to_string(), ScrollPos::Offset(10));
         state.page_down("APX-1", 20);
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(30));
@@ -403,7 +419,9 @@ mod tests {
     fn test_page_down_clamps_to_tail() {
         let mut state = AgentsState::new();
         state.ensure_buffer("APX-1");
-        for i in 0..10 { state.append_log("APX-1", format!("line {i}")); }
+        for i in 0..10 {
+            state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
+        }
         state.log_scroll.insert("APX-1".to_string(), ScrollPos::Offset(5));
         state.page_down("APX-1", 100);
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Tail);
@@ -413,7 +431,9 @@ mod tests {
     fn test_page_up_from_tail() {
         let mut state = AgentsState::new();
         state.ensure_buffer("APX-1");
-        for i in 0..50 { state.append_log("APX-1", format!("line {i}")); }
+        for i in 0..50 {
+            state.append_entry("APX-1", LogEntry::Text(format!("line {i}")));
+        }
         // Tail → current is 49, page up by 20 → Offset(29)
         state.page_up("APX-1", 20);
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(29));

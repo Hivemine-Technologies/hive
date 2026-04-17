@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-#[allow(dead_code)] // Wired up in Task 9
 #[derive(Debug, Clone)]
 pub enum LogEntry {
     /// Plain text emitted by the agent outside any tool call.
@@ -18,7 +17,6 @@ pub enum LogEntry {
     Marker(String),
 }
 
-#[allow(dead_code)] // Wired up in Task 9
 #[derive(Debug, Clone)]
 pub struct ToolResult {
     pub output: String,
@@ -26,7 +24,7 @@ pub struct ToolResult {
     pub duration_ms: u64,
 }
 
-#[allow(dead_code)] // Wired up in Task 9
+#[allow(dead_code)] // Used by Task 10+ fold heuristics; tests exercise this now
 impl LogEntry {
     /// How many rendered body lines this entry produces when fully expanded.
     /// (Header not counted.) Useful for fold heuristics.
