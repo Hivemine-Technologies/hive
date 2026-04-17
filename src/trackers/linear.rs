@@ -177,7 +177,7 @@ pub fn parse_issues_response(json: &str) -> Result<Vec<Issue>> {
         .ok_or_else(|| HiveError::Tracker("missing issues.nodes in response".to_string()))?;
 
     let mut issues = Vec::with_capacity(nodes.len());
-    for node in nodes {
+    for (idx, node) in nodes.iter().enumerate() {
         let labels: Vec<String> = node["labels"]["nodes"]
             .as_array()
             .map(|arr| {
@@ -189,11 +189,17 @@ pub fn parse_issues_response(json: &str) -> Result<Vec<Issue>> {
 
         let priority_num = node["priority"].as_u64().unwrap_or(0) as u8;
 
+        // `identifier` is mandatory — Issue.id drives worktree paths and
+        // branch names, so defaulting to "" would produce mystery failures
+        // far from the parse site.
+        let id = node["identifier"].as_str().ok_or_else(|| {
+            HiveError::Tracker(format!(
+                "Linear response: issue at index {idx} is missing `identifier` field"
+            ))
+        })?.to_string();
+
         issues.push(Issue {
-            id: node["identifier"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
+            id,
             title: node["title"].as_str().unwrap_or_default().to_string(),
             priority: Some(priority_label(priority_num).to_string()),
             project: node["project"]["name"].as_str().map(|s| s.to_string()),
