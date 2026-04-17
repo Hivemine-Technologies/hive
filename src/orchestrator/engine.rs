@@ -558,42 +558,43 @@ async fn run_bot_reviews(
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
+
+        let mut resolved_count = 0u32;
         match github
             .list_unresolved_bot_threads(pr_number, &bot_authors)
             .await
         {
-            Ok(thread_ids) if !thread_ids.is_empty() => {
-                let count = thread_ids.len();
+            Ok(thread_ids) => {
                 for tid in &thread_ids {
-                    let _ = github.resolve_review_thread(tid).await;
+                    match github.resolve_review_thread(tid).await {
+                        Ok(()) => resolved_count += 1,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to resolve review thread {tid} on PR #{pr_number}: {e}"
+                            );
+                        }
+                    }
                 }
-                send_and_log(
-                    event_tx,
-                    runs_dir,
-                    issue_id,
-                    AgentEvent::TextDelta(format!(
-                        "[Bot Reviews] Resolved {count} review thread(s). \
-                         Replied to {inline_replied} inline comment(s), \
-                         posted summary for {} review comment(s). Resuming polling...\n",
-                        summary_items.len()
-                    )),
-                )
-                .await;
             }
-            _ => {
-                send_and_log(
-                    event_tx,
-                    runs_dir,
-                    issue_id,
-                    AgentEvent::TextDelta(format!(
-                        "[Bot Reviews] Replied to {inline_replied} inline comment(s), \
-                         posted summary for {} review comment(s). Resuming polling...\n",
-                        summary_items.len()
-                    )),
-                )
-                .await;
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to list unresolved threads on PR #{pr_number}: {e}"
+                );
             }
         }
+
+        send_and_log(
+            event_tx,
+            runs_dir,
+            issue_id,
+            AgentEvent::TextDelta(format!(
+                "[Bot Reviews] Resolved {resolved_count} thread(s), \
+                 replied to {inline_replied} inline comment(s), \
+                 posted summary for {} review comment(s). Resuming polling...\n",
+                summary_items.len()
+            )),
+        )
+        .await;
     }
 }
 
