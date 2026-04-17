@@ -344,6 +344,37 @@ pub fn flatten_entries(buf: &EntryBuffer) -> Vec<String> {
     out
 }
 
+/// Walk the rendered line list and return the tool_use_id that owns a
+/// given rendered-line index. The walk must use the same fold predicate
+/// as the current render to produce consistent indices.
+pub fn tool_at_line<F>(buf: &EntryBuffer, line_idx: usize, is_folded: F) -> Option<String>
+where
+    F: Fn(&str, bool) -> bool,
+{
+    let mut cursor = 0usize;
+    for entry in buf.entries() {
+        let (rendered, id): (usize, Option<&str>) = match entry {
+            LogEntry::Text(s) => (s.lines().count().max(1), None),
+            LogEntry::Marker(_) => (1, None),
+            LogEntry::Tool { tool_use_id, result, .. } => {
+                let default = crate::tui::widgets::log_entry::should_auto_fold(entry);
+                let folded = is_folded(tool_use_id, default);
+                let body = if folded {
+                    0
+                } else {
+                    result.as_ref().map(|r| r.output.lines().count()).unwrap_or(0)
+                };
+                (1 + body, Some(tool_use_id.as_str()))
+            }
+        };
+        if line_idx < cursor + rendered {
+            return id.map(String::from);
+        }
+        cursor += rendered;
+    }
+    None
+}
+
 pub fn render_entries<F>(
     frame: &mut Frame,
     area: Rect,
@@ -509,6 +540,24 @@ mod tests {
         assert_eq!(lines.len(), 4); // header + 3 body
         assert!(lines[0].contains("▼"));
         assert!(lines[1].contains("a"));
+    }
+
+    #[test]
+    fn test_tool_at_line_finds_tool() {
+        use crate::tui::widgets::log_entry::{LogEntry, ToolResult};
+        let mut buf = EntryBuffer::new(10);
+        buf.push(LogEntry::Text("intro".into()));
+        buf.push(LogEntry::Tool {
+            tool_use_id: "t1".into(),
+            tool: "Bash".into(),
+            input: "ls".into(),
+            result: Some(ToolResult { output: "a\nb".into(), is_error: false, duration_ms: 1 }),
+            started_at: std::time::Instant::now(),
+        });
+        // line 0 = intro text, lines 1-3 = tool header + 2 body
+        assert_eq!(tool_at_line(&buf, 0, |_, _| false), None);
+        assert_eq!(tool_at_line(&buf, 1, |_, _| false), Some("t1".into()));
+        assert_eq!(tool_at_line(&buf, 3, |_, _| false), Some("t1".into()));
     }
 
     #[test]

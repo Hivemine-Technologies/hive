@@ -238,8 +238,6 @@ impl AgentsState {
         self.log_cursor.insert(issue_id.to_string(), clamped);
     }
 
-    // Consumed by Task 11/12/13 which wire fold toggle into rendering and keybindings
-    #[allow(dead_code)]
     pub fn toggle_fold(&mut self, issue_id: &str, tool_use_id: &str) {
         use crate::tui::widgets::log_entry::{should_auto_fold, LogEntry};
         let default_folded = self
@@ -257,7 +255,6 @@ impl AgentsState {
         entries.insert(tool_use_id.to_string(), !current);
     }
 
-    // Consumed by Task 11/12/13 which wire fold state into rendering
     #[allow(dead_code)]
     pub fn is_folded(&self, issue_id: &str, tool_use_id: &str, default_folded: bool) -> bool {
         self.fold_overrides
@@ -430,6 +427,8 @@ pub fn render(
             Span::raw(" page  "),
             Span::styled("g/G", Style::default().fg(Color::Cyan)),
             Span::raw(" top/bot  "),
+            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::raw(" fold  "),
             Span::styled("c", Style::default().fg(Color::Cyan)),
             Span::raw(" cancel  "),
             Span::styled("o", Style::default().fg(Color::Cyan)),

@@ -379,6 +379,20 @@ impl Tui {
                         self.agents_state.cursor_to_bottom(id);
                     }
                 }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    if let Some(id) = selected_issue_id.as_ref() {
+                        let line_idx = self.agents_state.cursor_line(id);
+                        if let Some(buf) = self.agents_state.log_buffers.get(id) {
+                            let overrides = self.agents_state.fold_overrides.get(id).cloned().unwrap_or_default();
+                            let is_folded_fn = move |tid: &str, default_folded: bool| {
+                                overrides.get(tid).copied().unwrap_or(default_folded)
+                            };
+                            if let Some(tool_use_id) = crate::tui::widgets::log_viewer::tool_at_line(buf, line_idx, is_folded_fn) {
+                                self.agents_state.toggle_fold(id, &tool_use_id);
+                            }
+                        }
+                    }
+                }
                 KeyCode::Tab => self.agents_state.toggle_focus(),
                 _ => {}
             },
