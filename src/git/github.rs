@@ -386,6 +386,12 @@ impl GitHub for GitHubClient {
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            tracing::warn!(
+                target: "hive::git",
+                "git push failed in {}:\nstderr:\n{}\nstdout:\n{}",
+                worktree_path.display(), stderr, stdout
+            );
             return Err(HiveError::Git(git2::Error::from_str(&format!(
                 "push failed: {stderr}"
             ))));
@@ -405,6 +411,12 @@ impl GitHub for GitHubClient {
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            tracing::warn!(
+                target: "hive::git",
+                "git push --force-with-lease failed in {}:\nstderr:\n{}\nstdout:\n{}",
+                worktree_path.display(), stderr, stdout
+            );
             return Err(HiveError::Git(git2::Error::from_str(&format!(
                 "force push failed: {stderr}"
             ))));
@@ -460,6 +472,12 @@ impl GitHub for GitHubClient {
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            tracing::warn!(
+                target: "hive::git",
+                "git push -u origin {branch} failed in {}:\nstderr:\n{stderr}\nstdout:\n{stdout}",
+                worktree_path.display()
+            );
             return Err(HiveError::Git(git2::Error::from_str(&format!(
                 "push failed: {stderr}"
             ))));
