@@ -5,6 +5,14 @@ edition = "2024"
 description = "Agent orchestration TUI for story-to-PR automation"
 license = "MIT"
 
+# Lints that help catch the silent-Result / let-it-die antipatterns
+# documented in CLAUDE.md. Combined with the ast-grep rules in
+# .ast-grep/rules/ (run `ast-grep scan src/`) these form our local
+# enforcement layer.
+[lints.clippy]
+question_mark = "warn"          # prefer `?` over `if let Err(e) = x { return Err(e) }`
+must_use_candidate = "warn"     # flag fns that should carry #[must_use]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }

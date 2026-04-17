@@ -1,0 +1,26 @@
+id: spawned-task-swallow
+language: rust
+severity: warning
+message: |
+  Spawned task logs an error but doesn't surface it: no StoryUpdated event,
+  no status flip, no eprintln. Downstream observers see the task as alive
+  when it has actually died. Update shared state on error, or write to
+  stderr so the user sees the crash.
+rule:
+  pattern: |
+    tokio::spawn(async move { $$$BODY })
+  has:
+    pattern: |
+      if let Err($E) = $R { $$$ tracing::$LEVEL!($$$A); $$$ }
+    stopBy: end
+  not:
+    any:
+      - has:
+          pattern: $$$.send($$$)
+          stopBy: end
+      - has:
+          pattern: run.status = $$$
+          stopBy: end
+      - has:
+          pattern: eprintln!($$$)
+          stopBy: end

@@ -1,0 +1,15 @@
+id: silent-result-swallow
+language: rust
+severity: warning
+message: |
+  Function logs an Err but returns Ok — callers cannot distinguish
+  success from failure. Propagate the error with `?` (or .map_err(...)?),
+  or change the signature to be infallible. See CLAUDE.md > Conventions.
+rule:
+  all:
+    - pattern: if let Err($E) = $X { $$$ }
+    - has:
+        pattern: tracing::$LEVEL!($$$A)
+        stopBy: end
+    - precedes:
+        pattern: Ok($$$B)
