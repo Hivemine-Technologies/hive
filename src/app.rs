@@ -190,7 +190,12 @@ pub async fn run(repo_path: &str) -> Result<()> {
     )?;
     tokio::spawn(async move {
         if let Err(e) = orchestrator.run().await {
-            tracing::error!("orchestrator error: {e}");
+            // The orchestrator is the only producer on event_tx — when this
+            // task ends, the channel closes and the TUI will exit. Make sure
+            // the user knows *why* by writing to stderr as well as the log,
+            // since tracing in TUI mode only writes to file.
+            tracing::error!("FATAL: orchestrator loop exited with error: {e}");
+            eprintln!("\n\nFATAL: orchestrator loop exited with error: {e}\n");
         }
     });
 
