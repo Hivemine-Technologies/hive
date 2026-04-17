@@ -24,6 +24,7 @@ pub struct AgentsState {
     pub focus: AgentFocus,
     pub log_buffers: HashMap<String, log_viewer::LogBuffer>,
     pub log_scroll: HashMap<String, ScrollPos>,
+    pub last_log_height: u16,
 }
 
 impl AgentsState {
@@ -33,6 +34,7 @@ impl AgentsState {
             focus: AgentFocus::Sidebar,
             log_buffers: HashMap::new(),
             log_scroll: HashMap::new(),
+            last_log_height: 0,
         }
     }
 
@@ -89,23 +91,18 @@ impl AgentsState {
         }
     }
 
-    // Keybindings (Task 5) will wire these; allow dead_code until then.
-    #[allow(dead_code)]
     pub fn page_down(&mut self, issue_id: &str, visible_height: usize) {
         self.scroll_by(issue_id, visible_height as isize);
     }
 
-    #[allow(dead_code)]
     pub fn page_up(&mut self, issue_id: &str, visible_height: usize) {
         self.scroll_by(issue_id, -(visible_height as isize));
     }
 
-    #[allow(dead_code)]
     pub fn half_page_down(&mut self, issue_id: &str, visible_height: usize) {
         self.scroll_by(issue_id, (visible_height / 2) as isize);
     }
 
-    #[allow(dead_code)]
     pub fn half_page_up(&mut self, issue_id: &str, visible_height: usize) {
         self.scroll_by(issue_id, -((visible_height / 2) as isize));
     }
@@ -168,7 +165,7 @@ pub fn render(
     frame: &mut Frame,
     area: Rect,
     runs: &[StoryRun],
-    state: &AgentsState,
+    state: &mut AgentsState,
 ) {
     let [sidebar_area, main_area] =
         Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)])
@@ -225,6 +222,8 @@ pub fn render(
         ])
         .areas(main_area);
 
+        state.last_log_height = log_area.height.saturating_sub(2);
+
         // Header
         let header_lines = vec![
             Line::from(vec![
@@ -280,8 +279,14 @@ pub fn render(
         let hints = Line::from(vec![
             Span::styled("Tab", Style::default().fg(Color::Cyan)),
             Span::raw(" focus  "),
+            Span::styled("j/k", Style::default().fg(Color::Cyan)),
+            Span::raw(" line  "),
+            Span::styled("C-d/C-u", Style::default().fg(Color::Cyan)),
+            Span::raw(" ½pg  "),
+            Span::styled("PgDn/PgUp", Style::default().fg(Color::Cyan)),
+            Span::raw(" page  "),
             Span::styled("g/G", Style::default().fg(Color::Cyan)),
-            Span::raw(" top/bottom  "),
+            Span::raw(" top/bot  "),
             Span::styled("c", Style::default().fg(Color::Cyan)),
             Span::raw(" cancel  "),
             Span::styled("o", Style::default().fg(Color::Cyan)),

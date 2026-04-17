@@ -118,7 +118,7 @@ impl Tui {
         Ok(())
     }
 
-    fn render(&self, frame: &mut ratatui::Frame) {
+    fn render(&mut self, frame: &mut ratatui::Frame) {
         use ratatui::layout::{Constraint, Layout};
 
         let [tab_area, main_area, status_area] = Layout::vertical([
@@ -132,7 +132,7 @@ impl Tui {
 
         match self.active_tab {
             Tab::Agents => {
-                tabs::agents::render(frame, main_area, &self.runs, &self.agents_state);
+                tabs::agents::render(frame, main_area, &self.runs, &mut self.agents_state);
             }
             Tab::Stories => {
                 tabs::stories::render(frame, main_area, &self.stories_state);
@@ -286,7 +286,7 @@ impl Tui {
         }
     }
 
-    async fn handle_agents_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) {
+    async fn handle_agents_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         let selected_issue_id = self
             .runs
             .get(self.agents_state.selected)
@@ -339,6 +339,30 @@ impl Tui {
                 KeyCode::Char('k') | KeyCode::Up => {
                     if let Some(id) = &selected_issue_id {
                         self.agents_state.scroll_log_up(id);
+                    }
+                }
+                KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(id) = selected_issue_id.as_ref() {
+                        let h = self.agents_state.last_log_height as usize;
+                        self.agents_state.half_page_down(id, h);
+                    }
+                }
+                KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(id) = selected_issue_id.as_ref() {
+                        let h = self.agents_state.last_log_height as usize;
+                        self.agents_state.half_page_up(id, h);
+                    }
+                }
+                KeyCode::PageDown => {
+                    if let Some(id) = selected_issue_id.as_ref() {
+                        let h = self.agents_state.last_log_height as usize;
+                        self.agents_state.page_down(id, h);
+                    }
+                }
+                KeyCode::PageUp => {
+                    if let Some(id) = selected_issue_id.as_ref() {
+                        let h = self.agents_state.last_log_height as usize;
+                        self.agents_state.page_up(id, h);
                     }
                 }
                 KeyCode::Char('g') => {
