@@ -46,6 +46,7 @@ impl GitHubClient {
             .pulls(&self.owner, &self.repo)
             .create(title, branch, base)
             .body(body)
+            .draft(true)
             .send()
             .await;
 
