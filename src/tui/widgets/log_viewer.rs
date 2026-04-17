@@ -6,6 +6,15 @@ use ratatui::{
     Frame,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrollPos {
+    /// Follow the tail — always show the newest content.
+    #[default]
+    Tail,
+    /// Manual scroll, value is a source-line index used as the render start.
+    Offset(usize),
+}
+
 pub struct LogBuffer {
     lines: Vec<String>,
     max_lines: usize,
@@ -44,7 +53,7 @@ pub fn render_log(
     frame: &mut Frame,
     area: Rect,
     buffer: &LogBuffer,
-    scroll: crate::tui::tabs::agents::ScrollPos,
+    scroll: ScrollPos,
     title: &str,
 ) {
     if buffer.is_empty() {
@@ -63,8 +72,8 @@ pub fn render_log(
     let total = buffer.len();
 
     let start = match scroll {
-        crate::tui::tabs::agents::ScrollPos::Tail => total.saturating_sub(visible_height),
-        crate::tui::tabs::agents::ScrollPos::Offset(n) => n.min(total.saturating_sub(visible_height)),
+        ScrollPos::Tail => total.saturating_sub(visible_height),
+        ScrollPos::Offset(n) => n.min(total.saturating_sub(visible_height)),
     };
 
     let end = (start + visible_height).min(total);

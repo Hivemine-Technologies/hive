@@ -17,14 +17,7 @@ pub enum AgentFocus {
     LogPanel,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ScrollPos {
-    /// Follow the tail — always show the newest content.
-    #[default]
-    Tail,
-    /// Manual scroll, value is a source-line index used as the render start.
-    Offset(usize),
-}
+pub use crate::tui::widgets::log_viewer::ScrollPos;
 
 pub struct AgentsState {
     pub selected: usize,
@@ -69,6 +62,7 @@ impl AgentsState {
     pub fn scroll_log_down(&mut self, issue_id: &str) {
         let Some(pos) = self.log_scroll.get_mut(issue_id) else { return };
         let Some(buf) = self.log_buffers.get(issue_id) else { return };
+        // When already at Tail, there's nothing below to scroll to.
         if let ScrollPos::Offset(n) = *pos {
             let next = n + 1;
             // Snap to Tail if we've caught up — better than "stuck one line below tail".
@@ -335,5 +329,16 @@ mod tests {
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Tail);
         state.scroll_log_up("APX-1");
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(3));
+    }
+
+    #[test]
+    fn test_scroll_up_at_top_is_noop() {
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        for i in 0..5 { state.append_log("APX-1", format!("line {i}")); }
+        state.scroll_to_top("APX-1");
+        assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(0));
+        state.scroll_log_up("APX-1");
+        assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(0));
     }
 }
