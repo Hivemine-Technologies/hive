@@ -306,7 +306,18 @@ pub fn render(
             .unwrap_or(ScrollPos::Tail);
 
         if let Some(buffer) = state.log_buffers.get(&run.issue_id) {
-            log_viewer::render_entries(frame, log_area, buffer, scroll, "Output");
+            let issue_id = run.issue_id.clone();
+            let overrides = state.fold_overrides.get(&issue_id).cloned().unwrap_or_default();
+            log_viewer::render_entries(
+                frame,
+                log_area,
+                buffer,
+                scroll,
+                "Output",
+                move |tool_use_id, default_folded| {
+                    overrides.get(tool_use_id).copied().unwrap_or(default_folded)
+                },
+            );
         } else {
             let empty = Paragraph::new("No output yet.")
                 .style(Style::default().fg(Color::DarkGray))

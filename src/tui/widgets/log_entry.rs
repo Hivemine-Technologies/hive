@@ -47,8 +47,7 @@ pub const FOLD_THRESHOLD: usize = 8;
 /// Should this entry render folded by default?
 /// Fold if: it's a tool with more than FOLD_THRESHOLD lines AND not an error.
 /// Errors always render expanded so failures are impossible to miss.
-// Consumed by Task 11's flatten_entries_with_fold
-#[allow(dead_code)]
+// Used by flatten_entries_with_fold in log_viewer.rs
 pub fn should_auto_fold(entry: &LogEntry) -> bool {
     matches!(
         entry,

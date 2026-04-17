@@ -232,7 +232,71 @@ pub fn render_log(
 // Bridge helpers: EntryBuffer → flatten → LogBuffer → render_log (Task 15 removes)
 // ---------------------------------------------------------------------------
 
+/// Flatten EntryBuffer to lines with fold awareness.
+/// `is_folded(tool_use_id, default_folded) -> bool` controls whether each tool entry
+/// is rendered collapsed (header-only) or expanded (header + body lines).
+pub fn flatten_entries_with_fold<F>(buf: &EntryBuffer, is_folded: F) -> Vec<String>
+where
+    F: Fn(&str, bool) -> bool,
+{
+    let mut out = Vec::new();
+    for entry in buf.entries() {
+        match entry {
+            LogEntry::Text(s) => {
+                for line in s.lines() {
+                    out.push(line.to_string());
+                }
+            }
+            LogEntry::Marker(s) => out.push(format!("[{s}]")),
+            LogEntry::Tool {
+                tool_use_id,
+                tool,
+                input,
+                result,
+                ..
+            } => {
+                let default = crate::tui::widgets::log_entry::should_auto_fold(entry);
+                let folded = is_folded(tool_use_id, default);
+                let (icon, body_hint) = match result {
+                    Some(r) if r.is_error => ("✗", format!(" · err · {}ms", r.duration_ms)),
+                    Some(r) => ("✓", format!(" · {}ms", r.duration_ms)),
+                    None => ("…", String::new()),
+                };
+                let glyph = if folded { "▶" } else { "▼" };
+                // UTF-8-safe truncation of input preview
+                let preview = if input.chars().count() > 120 {
+                    let safe_end = input
+                        .char_indices()
+                        .nth(120)
+                        .map(|(i, _)| i)
+                        .unwrap_or(input.len());
+                    format!("{}...", &input[..safe_end])
+                } else {
+                    input.clone()
+                };
+                let body_lines = result
+                    .as_ref()
+                    .map(|r| r.output.lines().count())
+                    .unwrap_or(0);
+                let summary = if folded && body_lines > 0 {
+                    format!(" ({body_lines} lines)")
+                } else {
+                    String::new()
+                };
+                out.push(format!("{glyph} {icon} {tool}: {preview}{body_hint}{summary}"));
+                if !folded && let Some(r) = result {
+                    for line in r.output.lines() {
+                        out.push(format!("  │ {line}"));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Flatten EntryBuffer to lines for the (still flat) renderer. Phase 3 replaces this.
+#[allow(dead_code)]
 pub fn flatten_entries(buf: &EntryBuffer) -> Vec<String> {
     let mut out = Vec::new();
     for entry in buf.entries() {
@@ -273,13 +337,16 @@ pub fn flatten_entries(buf: &EntryBuffer) -> Vec<String> {
     out
 }
 
-pub fn render_entries(
+pub fn render_entries<F>(
     frame: &mut Frame,
     area: Rect,
     buffer: &EntryBuffer,
     scroll: ScrollPos,
     title: &str,
-) {
+    is_folded: F,
+) where
+    F: Fn(&str, bool) -> bool,
+{
     if buffer.is_empty() {
         let empty = Paragraph::new("No output yet.")
             .style(Style::default().fg(Color::DarkGray))
@@ -287,7 +354,7 @@ pub fn render_entries(
         frame.render_widget(empty, area);
         return;
     }
-    let lines = flatten_entries(buffer);
+    let lines = flatten_entries_with_fold(buffer, is_folded);
     let temp = LogBuffer::from_lines(lines, 5000);
     render_log(frame, area, &temp, scroll, title);
 }
@@ -389,6 +456,48 @@ mod tests {
             }
             _ => panic!("expected attached result"),
         }
+    }
+
+    #[test]
+    fn test_flatten_folded_tool_shows_summary() {
+        use crate::tui::widgets::log_entry::{LogEntry, ToolResult};
+        let mut buf = EntryBuffer::new(10);
+        buf.push(LogEntry::Tool {
+            tool_use_id: "t1".into(),
+            tool: "Bash".into(),
+            input: "ls".into(),
+            result: Some(ToolResult {
+                output: "line\n".repeat(20),
+                is_error: false,
+                duration_ms: 100,
+            }),
+            started_at: std::time::Instant::now(),
+        });
+        let lines = flatten_entries_with_fold(&buf, |_, _| true);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("▶"));
+        assert!(lines[0].contains("20 lines"));
+    }
+
+    #[test]
+    fn test_flatten_unfolded_tool_shows_body() {
+        use crate::tui::widgets::log_entry::{LogEntry, ToolResult};
+        let mut buf = EntryBuffer::new(10);
+        buf.push(LogEntry::Tool {
+            tool_use_id: "t1".into(),
+            tool: "Bash".into(),
+            input: "ls".into(),
+            result: Some(ToolResult {
+                output: "a\nb\nc".into(),
+                is_error: false,
+                duration_ms: 100,
+            }),
+            started_at: std::time::Instant::now(),
+        });
+        let lines = flatten_entries_with_fold(&buf, |_, _| false);
+        assert_eq!(lines.len(), 4); // header + 3 body
+        assert!(lines[0].contains("▼"));
+        assert!(lines[1].contains("a"));
     }
 
     #[test]
