@@ -76,7 +76,13 @@ impl Notifier for DiscordNotifier {
             .await?;
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            // If reading the response body itself fails, surface that — an
+            // empty-string default hides the reason Discord rejected us
+            // (e.g. rate-limit JSON, invalid webhook, removed channel).
+            let text = match resp.text().await {
+                Ok(body) => body,
+                Err(e) => format!("<failed to read response body: {e}>"),
+            };
             return Err(HiveError::Notification(format!(
                 "Discord webhook error ({status}): {text}"
             )));
