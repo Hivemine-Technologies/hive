@@ -139,6 +139,10 @@ impl GitHub for MockGitHub {
         Ok(())
     }
 
+    async fn authenticated_login(&self) -> Result<String> {
+        Ok("hive-test-user".to_string())
+    }
+
     async fn list_unresolved_review_threads(
         &self,
         _pr_number: u64,

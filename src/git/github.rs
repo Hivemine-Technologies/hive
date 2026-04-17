@@ -19,6 +19,10 @@ pub trait GitHub: Send + Sync {
     async fn reply_to_inline_comment(&self, pr_number: u64, comment_id: u64, body: &str) -> Result<()>;
     async fn list_unresolved_review_threads(&self, pr_number: u64) -> Result<Vec<String>>;
     async fn resolve_review_thread(&self, thread_id: &str) -> Result<()>;
+    /// Login of the user the GITHUB_TOKEN is authenticated as. Used to
+    /// exclude Hive's own PR replies from the new-comment detector so we
+    /// don't recursively react to our own "Addressed in latest push" posts.
+    async fn authenticated_login(&self) -> Result<String>;
 }
 
 pub struct GitHubClient {
@@ -216,11 +220,6 @@ impl GitHub for GitHubClient {
                         .map(|u| u.login.clone())
                         .unwrap_or_default(),
                     body: c.body.clone(),
-                    is_bot: c
-                        .user
-                        .as_ref()
-                        .map(|u| u.r#type == "Bot")
-                        .unwrap_or(false),
                 });
             }
         }
@@ -246,11 +245,6 @@ impl GitHub for GitHubClient {
                         .map(|u| u.login.clone())
                         .unwrap_or_default(),
                     body: body.to_string(),
-                    is_bot: r
-                        .user
-                        .as_ref()
-                        .map(|u| u.r#type == "Bot")
-                        .unwrap_or(false),
                 });
             }
         }
@@ -272,7 +266,6 @@ impl GitHub for GitHubClient {
                     id: format!("issue-{}", c.id.into_inner()),
                     author: c.user.login.clone(),
                     body: body.to_string(),
-                    is_bot: c.user.r#type == "Bot",
                 });
             }
         }
@@ -334,6 +327,16 @@ impl GitHub for GitHubClient {
         }
 
         Ok(thread_ids)
+    }
+
+    async fn authenticated_login(&self) -> Result<String> {
+        let me = self
+            .octocrab
+            .current()
+            .user()
+            .await
+            .map_err(|e| HiveError::GitHub(format!("failed to fetch /user: {e}")))?;
+        Ok(me.login)
     }
 
     /// Resolve a PR review thread by its GraphQL node ID.
@@ -515,5 +518,4 @@ pub struct ReviewComment {
     pub id: String,
     pub author: String,
     pub body: String,
-    pub is_bot: bool,
 }

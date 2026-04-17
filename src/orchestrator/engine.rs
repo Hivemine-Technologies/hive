@@ -403,6 +403,21 @@ async fn run_bot_reviews(
     let mut quiet_polls: u8 = 0;
     let mut interval = tokio::time::interval(poll_interval);
 
+    // Self-login for the authenticated GitHub user, used to exclude our
+    // own "Addressed in latest push" replies from the new-comment detector.
+    // Without this, every regression from PrWatch would re-trigger a fix
+    // cycle on our own prior replies — an infinite loop.
+    let self_login = match github.authenticated_login().await {
+        Ok(login) => login,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to fetch authenticated user login ({e}); \
+                 self-exclusion disabled — risk of reacting to our own replies."
+            );
+            String::new()
+        }
+    };
+
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -427,12 +442,15 @@ async fn run_bot_reviews(
 
         let comments = github.poll_reviews(pr_number).await?;
 
-        // Filter for bot comments from the wait_for list
-        let new_bot_comments: Vec<&ReviewComment> = comments
+        // Filter in any reviewer's new comment — bot or human — minus our
+        // own replies (self_login). If `wait_for` is configured in the
+        // project's bot-reviews phase, only authors matching that allowlist
+        // trigger a fix cycle. Otherwise anything new counts.
+        let new_review_comments: Vec<&ReviewComment> = comments
             .iter()
             .filter(|c| {
-                c.is_bot
-                    && !seen_comment_ids.contains(&c.id)
+                !seen_comment_ids.contains(&c.id)
+                    && (self_login.is_empty() || c.author != self_login)
                     && (wait_for.is_empty()
                         || wait_for
                             .iter()
@@ -445,7 +463,7 @@ async fn run_bot_reviews(
             seen_comment_ids.insert(comment.id.clone());
         }
 
-        if new_bot_comments.is_empty() {
+        if new_review_comments.is_empty() {
             quiet_polls += 1;
             if quiet_polls >= 2 {
                 send_and_log(
@@ -453,7 +471,7 @@ async fn run_bot_reviews(
                     runs_dir,
                     issue_id,
                     AgentEvent::TextDelta(
-                        "[Bot Reviews] No new bot comments after 2 quiet polls. Done.\n"
+                        "[Bot Reviews] No new review comments after 2 quiet polls. Done.\n"
                             .to_string(),
                     ),
                 )
@@ -483,7 +501,7 @@ async fn run_bot_reviews(
         }
 
         fix_cycles += 1;
-        let comment_bodies: Vec<String> = new_bot_comments
+        let comment_bodies: Vec<String> = new_review_comments
             .iter()
             .map(|c| format!("[{}] {}", c.author, c.body))
             .collect();
@@ -493,8 +511,8 @@ async fn run_bot_reviews(
             runs_dir,
             issue_id,
             AgentEvent::TextDelta(format!(
-                "[Bot Reviews] {} new bot comment(s). Spawning fix agent (cycle {fix_cycles}/{max_fix_cycles})...\n",
-                new_bot_comments.len()
+                "[Bot Reviews] {} new review comment(s). Spawning fix agent (cycle {fix_cycles}/{max_fix_cycles})...\n",
+                new_review_comments.len()
             )),
         )
         .await;
@@ -552,7 +570,7 @@ async fn run_bot_reviews(
         let mut inline_replied = 0u32;
         let mut summary_items: Vec<String> = Vec::new();
 
-        for comment in &new_bot_comments {
+        for comment in &new_review_comments {
             if let Some(numeric_id) = comment.id.strip_prefix("inline-") {
                 if let Ok(cid) = numeric_id.parse::<u64>() {
                     match github
