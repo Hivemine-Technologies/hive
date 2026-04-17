@@ -41,6 +41,22 @@ impl LogEntry {
     }
 }
 
+/// Fold threshold: tool results with more than this many output lines are auto-folded.
+pub const FOLD_THRESHOLD: usize = 8;
+
+/// Should this entry render folded by default?
+/// Fold if: it's a tool with more than FOLD_THRESHOLD lines AND not an error.
+/// Errors always render expanded so failures are impossible to miss.
+// Consumed by Task 11's flatten_entries_with_fold
+#[allow(dead_code)]
+pub fn should_auto_fold(entry: &LogEntry) -> bool {
+    matches!(
+        entry,
+        LogEntry::Tool { result: Some(r), .. }
+            if !r.is_error && r.output.lines().count() > FOLD_THRESHOLD
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +133,53 @@ mod tests {
             started_at: Instant::now(),
         };
         assert!(!entry.is_error());
+    }
+
+    #[test]
+    fn test_auto_fold_large_success() {
+        let entry = LogEntry::Tool {
+            tool_use_id: "id".into(),
+            tool: "Bash".into(),
+            input: "{}".into(),
+            result: Some(ToolResult {
+                output: "line\n".repeat(20),
+                is_error: false,
+                duration_ms: 10,
+            }),
+            started_at: Instant::now(),
+        };
+        assert!(should_auto_fold(&entry));
+    }
+
+    #[test]
+    fn test_auto_fold_error_stays_expanded() {
+        let entry = LogEntry::Tool {
+            tool_use_id: "id".into(),
+            tool: "Bash".into(),
+            input: "{}".into(),
+            result: Some(ToolResult {
+                output: "line\n".repeat(20),
+                is_error: true,
+                duration_ms: 10,
+            }),
+            started_at: Instant::now(),
+        };
+        assert!(!should_auto_fold(&entry));
+    }
+
+    #[test]
+    fn test_auto_fold_small_stays_expanded() {
+        let entry = LogEntry::Tool {
+            tool_use_id: "id".into(),
+            tool: "Bash".into(),
+            input: "{}".into(),
+            result: Some(ToolResult {
+                output: "small".into(),
+                is_error: false,
+                duration_ms: 10,
+            }),
+            started_at: Instant::now(),
+        };
+        assert!(!should_auto_fold(&entry));
     }
 }

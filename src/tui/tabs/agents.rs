@@ -24,6 +24,9 @@ pub struct AgentsState {
     pub focus: AgentFocus,
     pub log_buffers: HashMap<String, log_viewer::EntryBuffer>,
     pub log_scroll: HashMap<String, ScrollPos>,
+    /// Per-issue fold overrides, keyed by tool_use_id.
+    /// None = use heuristic default; Some(bool) = user-pinned open/closed.
+    pub fold_overrides: HashMap<String, HashMap<String, bool>>,
     pub last_log_height: u16,
 }
 
@@ -34,6 +37,7 @@ impl AgentsState {
             focus: AgentFocus::Sidebar,
             log_buffers: HashMap::new(),
             log_scroll: HashMap::new(),
+            fold_overrides: HashMap::new(),
             last_log_height: 0,
         }
     }
@@ -149,6 +153,34 @@ impl AgentsState {
         if let Some(pos) = self.log_scroll.get_mut(issue_id) {
             *pos = ScrollPos::Tail;
         }
+    }
+
+    // Consumed by Task 11/12/13 which wire fold toggle into rendering and keybindings
+    #[allow(dead_code)]
+    pub fn toggle_fold(&mut self, issue_id: &str, tool_use_id: &str) {
+        use crate::tui::widgets::log_entry::{should_auto_fold, LogEntry};
+        let default_folded = self
+            .log_buffers
+            .get(issue_id)
+            .and_then(|b| {
+                b.entries().iter().find(|e| {
+                    matches!(e, LogEntry::Tool { tool_use_id: id, .. } if id == tool_use_id)
+                })
+            })
+            .map(should_auto_fold)
+            .unwrap_or(false);
+        let entries = self.fold_overrides.entry(issue_id.to_string()).or_default();
+        let current = entries.get(tool_use_id).copied().unwrap_or(default_folded);
+        entries.insert(tool_use_id.to_string(), !current);
+    }
+
+    // Consumed by Task 11/12/13 which wire fold state into rendering
+    #[allow(dead_code)]
+    pub fn is_folded(&self, issue_id: &str, tool_use_id: &str, default_folded: bool) -> bool {
+        self.fold_overrides
+            .get(issue_id)
+            .and_then(|m| m.get(tool_use_id).copied())
+            .unwrap_or(default_folded)
     }
 }
 
@@ -437,5 +469,35 @@ mod tests {
         // Tail → current is 49, page up by 20 → Offset(29)
         state.page_up("APX-1", 20);
         assert_eq!(state.log_scroll["APX-1"], ScrollPos::Offset(29));
+    }
+
+    #[test]
+    fn test_toggle_fold_flips_from_default() {
+        use crate::tui::widgets::log_entry::{LogEntry, ToolResult};
+        let mut state = AgentsState::new();
+        state.ensure_buffer("APX-1");
+        // Push a tool entry with a 20-line result (would auto-fold per heuristic).
+        state.append_entry(
+            "APX-1",
+            LogEntry::Tool {
+                tool_use_id: "t1".into(),
+                tool: "Bash".into(),
+                input: "ls".into(),
+                result: Some(ToolResult {
+                    output: "line\n".repeat(20),
+                    is_error: false,
+                    duration_ms: 1,
+                }),
+                started_at: std::time::Instant::now(),
+            },
+        );
+        // Default for this entry is folded=true (large success).
+        assert!(state.is_folded("APX-1", "t1", true));
+        // Toggle: should store false.
+        state.toggle_fold("APX-1", "t1");
+        assert!(!state.is_folded("APX-1", "t1", true));
+        // Toggle again: should store true.
+        state.toggle_fold("APX-1", "t1");
+        assert!(state.is_folded("APX-1", "t1", true));
     }
 }
