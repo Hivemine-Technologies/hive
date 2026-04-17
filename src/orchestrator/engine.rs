@@ -333,6 +333,18 @@ async fn run_ci_watch(
                     run_fix_agent(runner, fix_config, issue_id, event_tx, runs_dir).await?;
                 total_cost += fix_result.cost_usd;
 
+                if !matches!(fix_result.outcome, PhaseOutcome::Success) {
+                    send_and_log(
+                        event_tx, runs_dir, issue_id,
+                        AgentEvent::TextDelta(
+                            "[CI Watch] Fix agent failed — not pushing. Will retry on next poll...\n"
+                                .to_string(),
+                        ),
+                    )
+                    .await;
+                    continue;
+                }
+
                 // Push fixes so CI picks them up
                 send_and_log(
                     event_tx,
@@ -495,6 +507,19 @@ async fn run_bot_reviews(
 
         let fix_result = run_fix_agent(runner, fix_config, issue_id, event_tx, runs_dir).await?;
         total_cost += fix_result.cost_usd;
+
+        if !matches!(fix_result.outcome, PhaseOutcome::Success) {
+            send_and_log(
+                event_tx, runs_dir, issue_id,
+                AgentEvent::TextDelta(
+                    "[Bot Reviews] Fix agent failed — not pushing or replying. \
+                     Will retry on next poll...\n"
+                        .to_string(),
+                ),
+            )
+            .await;
+            continue;
+        }
 
         // Push fixes so bot reviewers see updated code
         send_and_log(
@@ -902,7 +927,12 @@ async fn run_pr_watch(
     }
 }
 
-/// Run a fix agent (used by CI watch and bot reviews).
+/// Run a fix agent (used by CI watch, bot reviews, and PR watch conflict resolution).
+///
+/// Reports the true outcome: `Failed` if the agent emitted any `Error` event
+/// or if the stream ended without a `Complete` event (subprocess crash /
+/// truncated output). Callers rely on this to decide whether to push the
+/// working-tree state — see the guard in `run_pr_watch`'s Conflicts arm.
 async fn run_fix_agent(
     runner: &dyn AgentRunner,
     config: SessionConfig,
@@ -915,17 +945,38 @@ async fn run_fix_agent(
 
     let mut stream = runner.output_stream(&handle);
     let mut total_cost = 0.0;
+    let mut error_messages: Vec<String> = Vec::new();
+    let mut saw_complete = false;
 
     use futures::StreamExt;
     while let Some(event) = stream.next().await {
-        if let AgentEvent::Complete { cost_usd } = &event {
-            total_cost = *cost_usd;
+        match &event {
+            AgentEvent::Complete { cost_usd } => {
+                total_cost = *cost_usd;
+                saw_complete = true;
+            }
+            AgentEvent::Error(msg) => error_messages.push(msg.clone()),
+            _ => {}
         }
         send_and_log(event_tx, runs_dir, issue_id, event).await;
     }
 
+    let outcome = if !error_messages.is_empty() {
+        PhaseOutcome::Failed {
+            reason: format!("Agent reported errors: {}", error_messages.join("; ")),
+        }
+    } else if !saw_complete {
+        PhaseOutcome::Failed {
+            reason: "Agent stream ended without Complete event \
+                    (subprocess crash or truncated output)"
+                .to_string(),
+        }
+    } else {
+        PhaseOutcome::Success
+    };
+
     Ok(PhaseExecutionResult {
-        outcome: PhaseOutcome::Success,
+        outcome,
         cost_usd: total_cost,
         session_id: Some(session_id),
     })
@@ -2033,6 +2084,62 @@ mod tests {
         assert_eq!(*github.force_push_count.lock().unwrap(), 1);
         // Cost should include the agent session
         assert!(result.cost_usd > 0.0, "expected agent cost tracked");
+    }
+
+    #[tokio::test]
+    async fn test_run_fix_agent_reports_failed_on_error_event() {
+        let runner = MockRunner::new();
+        runner.push_session_events(vec![
+            AgentEvent::Error("claude subprocess crashed".to_string()),
+            AgentEvent::Complete { cost_usd: 0.0 },
+        ]);
+
+        let event_tx = make_channel();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let config = SessionConfig {
+            working_dir: working_dir.path().to_path_buf(),
+            system_prompt: "test".to_string(),
+            model: None,
+            permission_mode: None,
+        };
+
+        let result = run_fix_agent(&runner, config, "TEST", &event_tx, runs_dir.path())
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Failed { .. }),
+            "agent Error events must propagate to Failed outcome, got {:?}",
+            result.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_fix_agent_reports_failed_without_complete_event() {
+        let runner = MockRunner::new();
+        // Stream ends without Complete — simulates subprocess crash / truncation
+        runner.push_session_events(vec![AgentEvent::TextDelta("partial work".to_string())]);
+
+        let event_tx = make_channel();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let config = SessionConfig {
+            working_dir: working_dir.path().to_path_buf(),
+            system_prompt: "test".to_string(),
+            model: None,
+            permission_mode: None,
+        };
+
+        let result = run_fix_agent(&runner, config, "TEST", &event_tx, runs_dir.path())
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Failed { .. }),
+            "missing Complete event must propagate to Failed outcome, got {:?}",
+            result.outcome
+        );
     }
 
     #[tokio::test]
