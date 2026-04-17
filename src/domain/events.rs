@@ -30,8 +30,16 @@ pub enum TuiCommand {
 pub enum AgentEvent {
     TextDelta(String),
     ToolUse {
+        #[allow(dead_code)]
+        tool_use_id: String,
         tool: String,
-        input_preview: String,
+        /// Full input JSON. Renderer decides how/whether to truncate.
+        input: String,
+    },
+    ToolResult {
+        tool_use_id: String,
+        output: String,
+        is_error: bool,
     },
     Error(String),
     Complete {

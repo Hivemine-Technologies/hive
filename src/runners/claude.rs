@@ -231,19 +231,33 @@ pub fn parse_claude_event(line: &str) -> Result<Option<AgentEvent>> {
                             }
                         }
                         Some("tool_use") => {
+                            let tool_use_id = item["id"].as_str().unwrap_or("").to_string();
                             let tool = item["name"].as_str().unwrap_or("unknown").to_string();
-                            let input_preview = item["input"].to_string();
-                            let input_preview = if input_preview.len() > 100 {
-                                format!("{}...", &input_preview[..100])
-                            } else {
-                                input_preview
-                            };
-                            return Ok(Some(AgentEvent::ToolUse {
-                                tool,
-                                input_preview,
-                            }));
+                            let input = item["input"].to_string();
+                            return Ok(Some(AgentEvent::ToolUse { tool_use_id, tool, input }));
                         }
                         _ => {}
+                    }
+                }
+            }
+            Ok(None)
+        }
+        "user" => {
+            let content = &v["message"]["content"];
+            if let Some(items) = content.as_array() {
+                for item in items {
+                    if item["type"].as_str() == Some("tool_result") {
+                        let tool_use_id = item["tool_use_id"].as_str().unwrap_or("").to_string();
+                        let is_error = item["is_error"].as_bool().unwrap_or(false);
+                        let output = match &item["content"] {
+                            Value::String(s) => s.clone(),
+                            Value::Array(arr) => arr.iter()
+                                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                                .collect::<Vec<_>>()
+                                .join(""),
+                            _ => String::new(),
+                        };
+                        return Ok(Some(AgentEvent::ToolResult { tool_use_id, output, is_error }));
                     }
                 }
             }
@@ -293,11 +307,40 @@ mod tests {
 
     #[test]
     fn test_parse_tool_use_event() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/src/main.rs"}}]}}"#;
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"/src/main.rs"}}]}}"#;
         let event = parse_claude_event(line).unwrap();
         match event {
-            Some(AgentEvent::ToolUse { tool, .. }) => assert_eq!(tool, "Read"),
+            Some(AgentEvent::ToolUse { tool_use_id, tool, input }) => {
+                assert_eq!(tool_use_id, "toolu_01");
+                assert_eq!(tool, "Read");
+                assert!(input.contains("/src/main.rs"));
+            }
             other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_tool_result_string_content() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"hook failed: cargo clippy","is_error":true}]}}"#;
+        match parse_claude_event(line).unwrap() {
+            Some(AgentEvent::ToolResult { tool_use_id, output, is_error }) => {
+                assert_eq!(tool_use_id, "toolu_01");
+                assert!(output.contains("hook failed"));
+                assert!(is_error);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_tool_result_array_content() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_02","content":[{"type":"text","text":"ok"}],"is_error":false}]}}"#;
+        match parse_claude_event(line).unwrap() {
+            Some(AgentEvent::ToolResult { output, is_error, .. }) => {
+                assert_eq!(output, "ok");
+                assert!(!is_error);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
         }
     }
 

@@ -10,8 +10,12 @@ fn format_event(event: &AgentEvent) -> String {
     let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
     match event {
         AgentEvent::TextDelta(text) => format!("[{ts}] TEXT: {text}"),
-        AgentEvent::ToolUse { tool, input_preview } => {
-            format!("[{ts}] TOOL: {tool} {{ {input_preview} }}")
+        AgentEvent::ToolUse { tool, input, .. } => {
+            format!("[{ts}] TOOL: {tool} {{ {input} }}")
+        }
+        AgentEvent::ToolResult { tool_use_id, output, is_error } => {
+            let marker = if *is_error { "ERROR" } else { "OK" };
+            format!("[{ts}] TOOL_RESULT({marker}): {tool_use_id} {output}")
         }
         AgentEvent::Error(msg) => format!("[{ts}] ERROR: {msg}"),
         AgentEvent::Complete { cost_usd } => format!("[{ts}] COMPLETE: cost=${cost_usd:.2}"),
@@ -43,8 +47,9 @@ mod tests {
     #[test]
     fn test_format_tool_use() {
         let event = AgentEvent::ToolUse {
+            tool_use_id: "toolu_01".to_string(),
             tool: "bash".to_string(),
-            input_preview: "ls -la".to_string(),
+            input: "ls -la".to_string(),
         };
         let result = format_event(&event);
         assert!(result.contains("TOOL: bash { ls -la }"), "got: {result}");

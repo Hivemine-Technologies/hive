@@ -585,11 +585,17 @@ impl Tui {
             OrchestratorEvent::AgentOutput { issue_id, event } => {
                 let line = match &event {
                     AgentEvent::TextDelta(text) => text.clone(),
-                    AgentEvent::ToolUse {
-                        tool,
-                        input_preview,
-                    } => {
-                        format!("[tool] {tool}: {input_preview}")
+                    AgentEvent::ToolUse { tool, input, .. } => {
+                        let preview = if input.len() > 120 {
+                            format!("{}...", &input[..120])
+                        } else {
+                            input.clone()
+                        };
+                        format!("[tool] {tool}: {preview}")
+                    }
+                    AgentEvent::ToolResult { output, is_error, .. } => {
+                        let marker = if *is_error { "✗" } else { "✓" };
+                        format!("[tool-result {marker}] {output}")
                     }
                     AgentEvent::Error(msg) => {
                         self.notify(format!("{issue_id}: {msg}"));
