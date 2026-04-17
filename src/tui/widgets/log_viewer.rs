@@ -140,11 +140,18 @@ pub fn render_log(
         })
         .collect();
 
-    let scroll_indicator = match scroll {
-        ScrollPos::Tail => {
-            if total > visible_height { format!(" [{total}/{total}]") } else { String::new() }
-        }
-        ScrollPos::Offset(n) => format!(" [{}/{total}]", (n + 1).min(total)),
+    let scroll_indicator = if total <= visible_height && matches!(scroll, ScrollPos::Tail) {
+        String::new()
+    } else {
+        let (line_no, pct) = match scroll {
+            ScrollPos::Tail => (total, 100),
+            ScrollPos::Offset(n) => {
+                let line_no = (n + 1).min(total);
+                let pct = if total <= 1 { 100 } else { (line_no * 100) / total };
+                (line_no, pct)
+            }
+        };
+        format!(" [{line_no}/{total} · {pct}%]")
     };
 
     let log = Paragraph::new(lines)
