@@ -114,9 +114,7 @@ impl Orchestrator {
                         TuiCommand::RetryStory { issue_id } => {
                             self.retry_story(&issue_id).await?;
                         }
-                        TuiCommand::RebaseStory { issue_id } => {
-                            self.rebase_story(&issue_id).await?;
-                        }
+                        TuiCommand::RebaseStory { .. } => {}
                         TuiCommand::CopyWorktreePath => {}
                     }
                 }
@@ -270,16 +268,6 @@ impl Orchestrator {
         };
 
         self.spawn_story_task(run_to_spawn);
-        Ok(())
-    }
-
-    async fn rebase_story(&mut self, issue_id: &str) -> Result<()> {
-        if let Some(run) = self.runs.get(issue_id) {
-            if let Some(ref wt_path) = run.worktree {
-                let result = crate::git::worktree::rebase_worktree(wt_path, &self.config.github.default_branch)?;
-                tracing::info!("rebase result for {issue_id}: {result:?}");
-            }
-        }
         Ok(())
     }
 
@@ -466,6 +454,7 @@ async fn story_phase_loop(
                         &issue_id,
                         &issue_detail.title,
                         working_dir,
+                        &config.github.default_branch,
                         phase_config,
                         &event_tx,
                         &runs_dir,
@@ -539,13 +528,31 @@ async fn story_phase_loop(
                 let _ = event_tx
                     .send(OrchestratorEvent::PhaseTransition {
                         issue_id: issue_id.clone(),
-                        from: old_phase,
+                        from: old_phase.clone(),
                         to: next.clone(),
                     })
                     .await;
 
                 if matches!(next, Phase::Complete) {
                     run.status = RunStatus::Complete;
+
+                    // Cleanup worktree after PrWatch (PR merged or closed)
+                    if matches!(old_phase, Phase::PrWatch) {
+                        if run.worktree.is_some() {
+                            let repo_path = std::path::Path::new(&*config.repo_path);
+                            let worktree_dir = repo_path.join(&config.worktree_dir);
+                            match crate::git::worktree::remove_worktree(
+                                repo_path, &issue_id, &worktree_dir,
+                            ) {
+                                Ok(()) => tracing::info!("Cleaned up worktree for {issue_id}"),
+                                Err(e) => tracing::warn!(
+                                    "Failed to cleanup worktree for {issue_id}: {e}"
+                                ),
+                            }
+                            run.worktree = None;
+                        }
+                    }
+
                     send_notification_if_configured(
                         &notifier,
                         NotifyEvent::StoryComplete {
