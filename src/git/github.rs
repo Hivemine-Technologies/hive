@@ -326,10 +326,9 @@ impl GitHub for GitHubClient {
                 || bot_authors
                     .iter()
                     .any(|b| author.to_lowercase().contains(&b.to_lowercase()));
-            if is_match {
-                if let Some(id) = thread["id"].as_str() {
-                    thread_ids.push(id.to_string());
-                }
+            if is_match
+                && let Some(id) = thread["id"].as_str() {
+                thread_ids.push(id.to_string());
             }
         }
 

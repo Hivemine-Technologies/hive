@@ -59,16 +59,15 @@ fn worktree_status(wt: &WorktreeInfo, runs: &[StoryRun]) -> (&'static str, Color
     if let Some(ref branch) = wt.branch {
         // Check if any run is using this branch
         for run in runs {
-            if let Some(ref run_branch) = run.branch {
-                if run_branch == branch {
-                    return match run.status {
-                        crate::domain::RunStatus::Running => ("running", Color::Green),
-                        crate::domain::RunStatus::NeedsAttention => ("attn", Color::Yellow),
-                        crate::domain::RunStatus::Complete => ("done", Color::Blue),
-                        crate::domain::RunStatus::Paused => ("paused", Color::Gray),
-                        crate::domain::RunStatus::Failed => ("failed", Color::Red),
-                    };
-                }
+            if let Some(ref run_branch) = run.branch
+                && run_branch == branch {
+                return match run.status {
+                    crate::domain::RunStatus::Running => ("running", Color::Green),
+                    crate::domain::RunStatus::NeedsAttention => ("attn", Color::Yellow),
+                    crate::domain::RunStatus::Complete => ("done", Color::Blue),
+                    crate::domain::RunStatus::Paused => ("paused", Color::Gray),
+                    crate::domain::RunStatus::Failed => ("failed", Color::Red),
+                };
             }
         }
     }
@@ -144,28 +143,27 @@ pub fn render(frame: &mut Frame, area: Rect, state: &WorktreesState, runs: &[Sto
     frame.render_widget(table, area);
 
     // Confirmation overlay
-    if state.confirm_delete {
-        if let Some(wt) = state.selected_worktree() {
-            let branch = wt.branch.as_deref().unwrap_or("unknown");
-            let msg = Line::from(vec![
-                Span::styled("Delete worktree ", Style::default().fg(Color::Yellow)),
-                Span::styled(
-                    branch,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("? (y/n)", Style::default().fg(Color::Yellow)),
-            ]);
-            let confirm = Paragraph::new(msg);
-            let confirm_area = Rect {
-                x: area.x + 1,
-                y: area.y + area.height.saturating_sub(2),
-                width: area.width.saturating_sub(2),
-                height: 1,
-            };
-            frame.render_widget(confirm, confirm_area);
-        }
+    if state.confirm_delete
+        && let Some(wt) = state.selected_worktree() {
+        let branch = wt.branch.as_deref().unwrap_or("unknown");
+        let msg = Line::from(vec![
+            Span::styled("Delete worktree ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                branch,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("? (y/n)", Style::default().fg(Color::Yellow)),
+        ]);
+        let confirm = Paragraph::new(msg);
+        let confirm_area = Rect {
+            x: area.x + 1,
+            y: area.y + area.height.saturating_sub(2),
+            width: area.width.saturating_sub(2),
+            height: 1,
+        };
+        frame.render_widget(confirm, confirm_area);
     }
 }
 

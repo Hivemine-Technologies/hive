@@ -41,6 +41,7 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: ProjectConfig,
         runs_dir: PathBuf,
@@ -293,10 +294,9 @@ impl Orchestrator {
 
     #[allow(dead_code)]
     async fn send_notification(&self, event: NotifyEvent) {
-        if let Some(ref notifier) = self.notifier {
-            if let Err(e) = notifier.notify(event).await {
-                tracing::warn!("notification failed: {e}");
-            }
+        if let Some(ref notifier) = self.notifier
+            && let Err(e) = notifier.notify(event).await {
+            tracing::warn!("notification failed: {e}");
         }
     }
 }
@@ -315,6 +315,7 @@ fn resolve_phase_runner<'a>(
         .expect("default runner must be configured")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn story_phase_loop(
     mut run: StoryRun,
     config: Arc<ProjectConfig>,
@@ -664,10 +665,9 @@ async fn story_phase_loop(
 }
 
 async fn send_notification_if_configured(notifier: &Option<Arc<dyn Notifier>>, event: NotifyEvent) {
-    if let Some(notifier) = notifier {
-        if let Err(e) = notifier.notify(event).await {
-            tracing::warn!("notification failed: {e}");
-        }
+    if let Some(notifier) = notifier
+        && let Err(e) = notifier.notify(event).await {
+        tracing::warn!("notification failed: {e}");
     }
 }
 

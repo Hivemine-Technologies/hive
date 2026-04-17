@@ -58,12 +58,10 @@ impl AgentsState {
     }
 
     pub fn scroll_log_down(&mut self, issue_id: &str) {
-        if let Some(scroll) = self.log_scroll.get_mut(issue_id) {
-            if let Some(buf) = self.log_buffers.get(issue_id) {
-                if *scroll > 0 {
-                    *scroll = (*scroll + 1).min(buf.len().saturating_sub(1));
-                }
-            }
+        if let Some(scroll) = self.log_scroll.get_mut(issue_id)
+            && let Some(buf) = self.log_buffers.get(issue_id)
+            && *scroll > 0 {
+            *scroll = (*scroll + 1).min(buf.len().saturating_sub(1));
         }
     }
 
@@ -73,10 +71,9 @@ impl AgentsState {
                 *scroll -= 1;
             } else {
                 // Switch from follow mode to manual scroll
-                if let Some(buf) = self.log_buffers.get(issue_id) {
-                    if buf.len() > 1 {
-                        *scroll = buf.len().saturating_sub(2);
-                    }
+                if let Some(buf) = self.log_buffers.get(issue_id)
+                    && buf.len() > 1 {
+                    *scroll = buf.len().saturating_sub(2);
                 }
             }
         }

@@ -63,10 +63,9 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<WorktreeInfo>> {
             if let Some(ref mut wt) = current {
                 wt.branch = Some(branch.to_string());
             }
-        } else if line == "bare" {
-            if let Some(ref mut wt) = current {
-                wt.is_bare = true;
-            }
+        } else if line == "bare"
+            && let Some(ref mut wt) = current {
+            wt.is_bare = true;
         }
     }
     if let Some(wt) = current {

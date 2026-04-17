@@ -44,6 +44,7 @@ pub struct PhaseExecutionResult {
 ///
 /// Starts an agent session, streams output to the TUI via event_tx, and
 /// waits for completion.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent_phase(
     runner: &dyn AgentRunner,
     phase: &Phase,
@@ -139,10 +140,9 @@ pub fn resolve_phase_runner_config<'a>(
 
 /// Get max attempts for a phase (default varies by phase type).
 pub fn max_attempts_for_phase(phase: &Phase, phase_config: Option<&PhaseConfig>) -> u8 {
-    if let Some(config) = phase_config {
-        if let Some(max) = config.max_attempts {
-            return max;
-        }
+    if let Some(config) = phase_config
+        && let Some(max) = config.max_attempts {
+        return max;
     }
     // Defaults per spec
     match phase {
@@ -161,6 +161,7 @@ pub fn max_attempts_for_phase(phase: &Phase, phase_config: Option<&PhaseConfig>)
 ///
 /// Polls GitHub on an interval. When issues are detected (CI failure,
 /// new bot comments), spawns a fix agent and retries.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_polling_phase(
     github: &dyn GitHub,
     runner: &dyn AgentRunner,
@@ -222,6 +223,7 @@ pub async fn run_polling_phase(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ci_watch(
     github: &dyn GitHub,
     runner: &dyn AgentRunner,
@@ -357,6 +359,7 @@ async fn run_ci_watch(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_bot_reviews(
     github: &dyn GitHub,
     runner: &dyn AgentRunner,
@@ -594,6 +597,7 @@ async fn run_bot_reviews(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_pr_watch(
     github: &dyn GitHub,
     runner: &dyn AgentRunner,
@@ -816,11 +820,8 @@ async fn run_fix_agent(
 
     use futures::StreamExt;
     while let Some(event) = stream.next().await {
-        match &event {
-            AgentEvent::Complete { cost_usd } => {
-                total_cost = *cost_usd;
-            }
-            _ => {}
+        if let AgentEvent::Complete { cost_usd } = &event {
+            total_cost = *cost_usd;
         }
         send_and_log(event_tx, runs_dir, issue_id, event).await;
     }
@@ -949,6 +950,7 @@ pub struct DirectPhaseResult {
 ///
 /// Direct phases perform actions via API calls. RaisePr optionally spawns
 /// a short agent session to generate a structured PR body.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_direct_phase(
     phase: &Phase,
     github: &dyn GitHub,
@@ -1000,6 +1002,7 @@ pub async fn run_direct_phase(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_raise_pr(
     github: &dyn GitHub,
     tracker: &dyn IssueTracker,
@@ -1072,6 +1075,7 @@ async fn run_raise_pr(
 /// Collects git data (diff stat, commit log), spawns an agent to write
 /// PR_BODY.md, then reads the file. Falls back to a static template
 /// if anything fails.
+#[allow(clippy::too_many_arguments)]
 async fn generate_pr_body(
     runner: &dyn AgentRunner,
     issue_id: &str,
@@ -1151,6 +1155,7 @@ async fn generate_pr_body(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_handoff(
     github: &dyn GitHub,
     _tracker: &dyn IssueTracker,

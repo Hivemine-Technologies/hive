@@ -150,14 +150,11 @@ pub async fn run(repo_path: &str) -> Result<()> {
 
     // Validate tracker credentials are resolvable
     if project.tracker == "linear" {
-        if let Some(ref key) = tracker_conn.api_key {
-            if key.starts_with("env:") {
-                let var_name = &key[4..];
-                if std::env::var(var_name).is_err() {
-                    eprintln!("⚠ {var_name} is not set. Issue tracker queries will fail.");
-                    eprintln!("  Set it with: export {var_name}=lin_api_...\n");
-                }
-            }
+        if let Some(ref key) = tracker_conn.api_key
+            && let Some(var_name) = key.strip_prefix("env:")
+            && std::env::var(var_name).is_err() {
+            eprintln!("⚠ {var_name} is not set. Issue tracker queries will fail.");
+            eprintln!("  Set it with: export {var_name}=lin_api_...\n");
         }
     } else if project.tracker == "jira" {
         for (label, value) in [
@@ -165,14 +162,12 @@ pub async fn run(repo_path: &str) -> Result<()> {
             ("email", tracker_conn.email.as_ref()),
             ("base_url", tracker_conn.base_url.as_ref()),
         ] {
-            if let Some(v) = value {
-                if let Some(var_name) = v.strip_prefix("env:") {
-                    if std::env::var(var_name).is_err() {
-                        eprintln!(
-                            "⚠ {var_name} (jira {label}) is not set. Jira tracker calls will fail."
-                        );
-                    }
-                }
+            if let Some(v) = value
+                && let Some(var_name) = v.strip_prefix("env:")
+                && std::env::var(var_name).is_err() {
+                eprintln!(
+                    "⚠ {var_name} (jira {label}) is not set. Jira tracker calls will fail."
+                );
             }
         }
     }

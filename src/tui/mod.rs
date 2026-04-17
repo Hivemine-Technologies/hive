@@ -101,10 +101,9 @@ impl Tui {
 
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                    if event::poll(Duration::from_millis(0))? {
-                        if let Event::Key(key) = event::read()? {
-                            self.handle_key(key.code, key.modifiers).await;
-                        }
+                    if event::poll(Duration::from_millis(0))?
+                        && let Event::Key(key) = event::read()? {
+                        self.handle_key(key.code, key.modifiers).await;
                     }
                 }
                 Some(detail) = self.detail_rx.recv() => {
