@@ -401,27 +401,68 @@ impl GitHub for GitHubClient {
 
     /// Force-push the current branch from a worktree using --force-with-lease.
     /// Assumes upstream is already set (via `push -u` during RaisePr).
+    ///
+    /// Retries transparently on "stale info" rejection by re-fetching and
+    /// retrying the push. Stale-lease happens when the remote ref advanced
+    /// between our fetch and our push — usually a benign race with GitHub's
+    /// async ref propagation or with another push targeting the same ref.
+    /// Genuine divergence (non-fast-forward without --force) is NOT retried.
     async fn force_push_current_branch(
         &self,
         worktree_path: &std::path::Path,
     ) -> Result<()> {
-        let output = std::process::Command::new("git")
-            .args(["push", "--force-with-lease"])
-            .current_dir(worktree_path)
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        const MAX_ATTEMPTS: u8 = 3;
+        let mut last_stderr = String::new();
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let output = std::process::Command::new("git")
+                .args(["push", "--force-with-lease"])
+                .current_dir(worktree_path)
+                .output()?;
+            if output.status.success() {
+                if attempt > 1 {
+                    tracing::info!(
+                        target: "hive::git",
+                        "git push --force-with-lease succeeded on attempt {attempt}/{MAX_ATTEMPTS}"
+                    );
+                }
+                return Ok(());
+            }
+
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let stdout = String::from_utf8_lossy(&output.stdout);
             tracing::warn!(
                 target: "hive::git",
-                "git push --force-with-lease failed in {}:\nstderr:\n{}\nstdout:\n{}",
-                worktree_path.display(), stderr, stdout
+                "git push --force-with-lease attempt {attempt}/{MAX_ATTEMPTS} failed in {}:\nstderr:\n{stderr}\nstdout:\n{stdout}",
+                worktree_path.display()
             );
-            return Err(HiveError::Git(git2::Error::from_str(&format!(
-                "force push failed: {stderr}"
-            ))));
+            last_stderr = stderr;
+
+            // Only retry on stale-lease races. Any other rejection (diverged
+            // history, protected branch, auth failure) is not retriable.
+            let is_stale_lease = last_stderr.contains("stale info");
+            if !is_stale_lease || attempt == MAX_ATTEMPTS {
+                break;
+            }
+
+            // Re-fetch to update our cached view of origin's refs, then retry.
+            let fetch = std::process::Command::new("git")
+                .args(["fetch", "origin"])
+                .current_dir(worktree_path)
+                .output()?;
+            if !fetch.status.success() {
+                let fetch_err = String::from_utf8_lossy(&fetch.stderr);
+                tracing::warn!(
+                    target: "hive::git",
+                    "git fetch during force-push retry failed: {fetch_err}"
+                );
+                break;
+            }
         }
-        Ok(())
+
+        Err(HiveError::Git(git2::Error::from_str(&format!(
+            "force push failed after {MAX_ATTEMPTS} attempt(s): {last_stderr}"
+        ))))
     }
 
     /// Reply to an inline review comment on a PR.
