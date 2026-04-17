@@ -90,6 +90,34 @@ pub fn remove_worktree(repo_path: &Path, issue_id: &str, worktree_dir: &Path) ->
     Ok(())
 }
 
+/// Compare the worktree's HEAD to its upstream tracking branch using the
+/// local ref cache (no fetch). Returns `Some(description)` when local and
+/// upstream have diverged (both ahead *and* behind), which is the shape of
+/// damage a crashed force-push leaves behind. Returns `None` when clean,
+/// strictly ahead, strictly behind, or when we can't tell (no upstream,
+/// detached HEAD, git error).
+pub fn detect_divergence(worktree_path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+        .current_dir(worktree_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut parts = text.split_whitespace();
+    let ahead: u32 = parts.next()?.parse().ok()?;
+    let behind: u32 = parts.next()?.parse().ok()?;
+    if ahead > 0 && behind > 0 {
+        Some(format!(
+            "worktree is {ahead} commit(s) ahead of and {behind} commit(s) behind its upstream"
+        ))
+    } else {
+        None
+    }
+}
+
 pub fn rebase_worktree(worktree_path: &Path, default_branch: &str) -> Result<RebaseResult> {
     let fetch = Command::new("git")
         .args(["fetch", "origin"])

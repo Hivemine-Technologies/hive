@@ -25,7 +25,6 @@ pub struct MockGitHub {
     pub posted_comments: Mutex<Vec<(u64, String)>>,
     pub pushed_branches: Mutex<Vec<String>>,
     pub force_push_count: Mutex<u32>,
-    pub push_count: Mutex<u32>,
     pub resolved_threads: Mutex<Vec<String>>,
     pub replied_comments: Mutex<Vec<(u64, u64, String)>>,
 }
@@ -46,7 +45,6 @@ impl MockGitHub {
             posted_comments: Mutex::new(Vec::new()),
             pushed_branches: Mutex::new(Vec::new()),
             force_push_count: Mutex::new(0),
-            push_count: Mutex::new(0),
             resolved_threads: Mutex::new(Vec::new()),
             replied_comments: Mutex::new(Vec::new()),
         }
@@ -112,11 +110,6 @@ impl GitHub for MockGitHub {
             .lock()
             .unwrap()
             .push(branch.to_string());
-        Ok(())
-    }
-
-    async fn push_current_branch(&self, _worktree_path: &Path) -> Result<()> {
-        *self.push_count.lock().unwrap() += 1;
         Ok(())
     }
 

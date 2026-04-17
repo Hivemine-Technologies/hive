@@ -14,7 +14,6 @@ pub trait GitHub: Send + Sync {
     async fn poll_pr_status(&self, pr_number: u64) -> Result<PrStatus>;
     async fn poll_reviews(&self, pr_number: u64) -> Result<Vec<ReviewComment>>;
     async fn push_branch(&self, worktree_path: &std::path::Path, branch: &str) -> Result<()>;
-    async fn push_current_branch(&self, worktree_path: &std::path::Path) -> Result<()>;
     async fn force_push_current_branch(&self, worktree_path: &std::path::Path) -> Result<()>;
     async fn post_pr_comment(&self, pr_number: u64, body: &str) -> Result<()>;
     async fn reply_to_inline_comment(&self, pr_number: u64, comment_id: u64, body: &str) -> Result<()>;
@@ -370,31 +369,6 @@ impl GitHub for GitHubClient {
                 "resolveReviewThread for {thread_id} did not mark thread resolved \
                  (likely missing pull_requests:write scope); response: {resp}"
             )));
-        }
-        Ok(())
-    }
-
-    /// Push the current branch from a worktree. Assumes upstream is already set
-    /// (via `push -u` during RaisePr).
-    async fn push_current_branch(
-        &self,
-        worktree_path: &std::path::Path,
-    ) -> Result<()> {
-        let output = std::process::Command::new("git")
-            .args(["push"])
-            .current_dir(worktree_path)
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            tracing::warn!(
-                target: "hive::git",
-                "git push failed in {}:\nstderr:\n{}\nstdout:\n{}",
-                worktree_path.display(), stderr, stdout
-            );
-            return Err(HiveError::Git(git2::Error::from_str(&format!(
-                "push failed: {stderr}"
-            ))));
         }
         Ok(())
     }

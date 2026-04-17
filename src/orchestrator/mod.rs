@@ -103,6 +103,50 @@ impl Orchestrator {
 
         for issue_id in to_resume {
             if let Some(run) = self.runs.get(&issue_id).cloned() {
+                // Before spawning, check for worktree/upstream divergence —
+                // the fingerprint of a prior crashed force-push. Resuming
+                // blindly in that state just re-crashes in the same phase
+                // and masks the real failure.
+                if let Some(worktree) = run.worktree.as_ref()
+                    && let Some(divergence) =
+                        crate::git::worktree::detect_divergence(worktree)
+                {
+                    tracing::warn!(
+                        "Worktree for {issue_id} diverged from upstream: {divergence}. \
+                         Marking NeedsAttention; not auto-resuming."
+                    );
+                    let reason = format!(
+                        "Worktree diverged from upstream on resume: {divergence}. \
+                         Previous run likely failed mid-push; human intervention needed \
+                         (rebase or force-push from the worktree)."
+                    );
+                    if let Some(run_mut) = self.runs.get_mut(&issue_id) {
+                        run_mut.status = RunStatus::NeedsAttention;
+                        run_mut.phase = Phase::NeedsAttention {
+                            reason: reason.clone(),
+                        };
+                        run_mut.updated_at = Utc::now();
+                        if let Err(e) = persistence::save_run(&self.runs_dir, run_mut) {
+                            tracing::error!(
+                                "Failed to persist NeedsAttention state for {issue_id}: {e}"
+                            );
+                        }
+                        let _ = self
+                            .event_tx
+                            .send(OrchestratorEvent::StoryUpdated(run_mut.clone()))
+                            .await;
+                    }
+                    send_notification_if_configured(
+                        &self.notifier,
+                        NotifyEvent::NeedsAttention {
+                            issue_id: issue_id.clone(),
+                            reason,
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+
                 tracing::info!(
                     "Resuming interrupted story: {issue_id} at phase {}",
                     run.phase

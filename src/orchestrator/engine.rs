@@ -1764,7 +1764,6 @@ mod tests {
         );
         // Fix agent completed → force_push_current_branch was called once
         assert_eq!(*github.force_push_count.lock().unwrap(), 1);
-        assert_eq!(*github.push_count.lock().unwrap(), 0);
     }
 
     // -----------------------------------------------------------------------
