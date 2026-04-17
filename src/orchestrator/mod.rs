@@ -37,6 +37,7 @@ pub struct Orchestrator {
     event_tx: mpsc::Sender<OrchestratorEvent>,
     command_rx: mpsc::Receiver<TuiCommand>,
     cancel_tokens: HashMap<String, CancellationToken>,
+    git_ops: Arc<dyn crate::git::worktree::GitOps>,
 }
 
 impl Orchestrator {
@@ -50,6 +51,7 @@ impl Orchestrator {
         notifier: Option<Arc<dyn Notifier>>,
         event_tx: mpsc::Sender<OrchestratorEvent>,
         command_rx: mpsc::Receiver<TuiCommand>,
+        git_ops: Arc<dyn crate::git::worktree::GitOps>,
     ) -> Result<Self> {
         let runs_vec = persistence::load_all_runs(&runs_dir)?;
         let runs: HashMap<String, StoryRun> = runs_vec
@@ -68,6 +70,7 @@ impl Orchestrator {
             event_tx,
             command_rx,
             cancel_tokens: HashMap::new(),
+            git_ops,
         })
     }
 
@@ -206,11 +209,12 @@ impl Orchestrator {
         let notifier = self.notifier.clone();
         let event_tx = self.event_tx.clone();
         let runs_dir = self.runs_dir.clone();
+        let git_ops = self.git_ops.clone();
 
         tokio::spawn(async move {
             let result = story_phase_loop(
                 run, config, runners, default_runner, tracker, github, notifier, event_tx,
-                runs_dir, token,
+                runs_dir, token, git_ops,
             )
             .await;
             if let Err(e) = result {
@@ -322,6 +326,7 @@ async fn story_phase_loop(
     event_tx: mpsc::Sender<OrchestratorEvent>,
     runs_dir: PathBuf,
     cancel_token: CancellationToken,
+    git_ops: Arc<dyn crate::git::worktree::GitOps>,
 ) -> Result<()> {
     let issue_id = run.issue_id.clone();
 
@@ -489,6 +494,7 @@ async fn story_phase_loop(
                         &event_tx,
                         &runs_dir,
                         &cancel_token,
+                        git_ops.as_ref(),
                     )
                     .await?;
                     run.cost_usd += result.cost_usd;
@@ -573,9 +579,7 @@ async fn story_phase_loop(
                     if matches!(old_phase, Phase::PrWatch) && run.worktree.is_some() {
                         let repo_path = std::path::Path::new(&*config.repo_path);
                         let worktree_dir = repo_path.join(&config.worktree_dir);
-                        match crate::git::worktree::remove_worktree(
-                            repo_path, &issue_id, &worktree_dir,
-                        ) {
+                        match git_ops.remove(repo_path, &issue_id, &worktree_dir) {
                             Ok(()) => tracing::info!("Cleaned up worktree for {issue_id}"),
                             Err(e) => tracing::warn!(
                                 "Failed to cleanup worktree for {issue_id}: {e}"

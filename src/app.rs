@@ -177,6 +177,9 @@ pub async fn run(repo_path: &str) -> Result<()> {
         }
     }
 
+    let git_ops: Arc<dyn crate::git::worktree::GitOps> =
+        Arc::new(crate::git::worktree::DefaultGitOps);
+
     // Start orchestrator in background
     let mut orchestrator = Orchestrator::new(
         project,
@@ -188,6 +191,7 @@ pub async fn run(repo_path: &str) -> Result<()> {
         notifier,
         event_tx,
         command_rx,
+        git_ops,
     )?;
     tokio::spawn(async move {
         if let Err(e) = orchestrator.run().await {

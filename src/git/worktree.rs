@@ -121,11 +121,30 @@ pub struct WorktreeInfo {
     pub is_bare: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RebaseResult {
     Success,
     Conflicts,
     Failed,
+}
+
+/// Trait abstracting git worktree operations for testability.
+pub trait GitOps: Send + Sync {
+    fn rebase(&self, worktree_path: &Path, default_branch: &str) -> Result<RebaseResult>;
+    fn remove(&self, repo_path: &Path, issue_id: &str, worktree_dir: &Path) -> Result<()>;
+}
+
+/// Default implementation that delegates to the free functions.
+pub struct DefaultGitOps;
+
+impl GitOps for DefaultGitOps {
+    fn rebase(&self, worktree_path: &Path, default_branch: &str) -> Result<RebaseResult> {
+        rebase_worktree(worktree_path, default_branch)
+    }
+
+    fn remove(&self, repo_path: &Path, issue_id: &str, worktree_dir: &Path) -> Result<()> {
+        remove_worktree(repo_path, issue_id, worktree_dir)
+    }
 }
 
 #[cfg(test)]

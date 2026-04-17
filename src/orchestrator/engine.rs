@@ -174,6 +174,7 @@ pub async fn run_polling_phase(
     event_tx: &mpsc::Sender<OrchestratorEvent>,
     runs_dir: &Path,
     cancel_token: &tokio_util::sync::CancellationToken,
+    git_ops: &dyn crate::git::worktree::GitOps,
 ) -> Result<PhaseExecutionResult> {
     match phase {
         Phase::CiWatch { .. } => {
@@ -210,6 +211,7 @@ pub async fn run_polling_phase(
             run_pr_watch(
                 github, runner, pr_number, issue_id, issue_title, working_dir,
                 default_branch, phase_config, event_tx, runs_dir, cancel_token,
+                git_ops,
             )
             .await
         }
@@ -604,6 +606,7 @@ async fn run_pr_watch(
     event_tx: &mpsc::Sender<OrchestratorEvent>,
     runs_dir: &Path,
     cancel_token: &tokio_util::sync::CancellationToken,
+    git_ops: &dyn crate::git::worktree::GitOps,
 ) -> Result<PhaseExecutionResult> {
     // PrWatch defaults to 5-minute polling (vs 30s for CI phases)
     let poll_interval = phase_config
@@ -694,9 +697,7 @@ async fn run_pr_watch(
                 .await;
 
                 // Try a clean rebase first (no agent cost if no real conflicts in files)
-                let rebase_result = crate::git::worktree::rebase_worktree(
-                    working_dir, default_branch,
-                )?;
+                let rebase_result = git_ops.rebase(working_dir, default_branch)?;
 
                 match rebase_result {
                     crate::git::worktree::RebaseResult::Success => {
@@ -1223,7 +1224,7 @@ mod tests {
     use crate::domain::{AgentEvent, Issue, IssueDetail, IssueFilters};
     use crate::domain::story_run::PrHandle;
     use crate::git::github::{CiStatus, PrStatus};
-    use crate::git::mock_github::MockGitHub;
+    use crate::git::mock_github::{MockGitHub, MockGitOps};
     use crate::runners::{AgentRunner, SessionConfig, SessionHandle};
     use crate::trackers::IssueTracker;
 
@@ -1380,6 +1381,7 @@ mod tests {
             &event_tx,
             runs_dir.path(),
             &cancel,
+            &MockGitOps::new(),
         )
         .await
         .unwrap();
@@ -1420,6 +1422,7 @@ mod tests {
             &event_tx,
             runs_dir.path(),
             &cancel,
+            &MockGitOps::new(),
         )
         .await
         .unwrap();
@@ -1460,6 +1463,7 @@ mod tests {
             &event_tx,
             runs_dir.path(),
             &cancel,
+            &MockGitOps::new(),
         )
         .await
         .unwrap();
@@ -1502,6 +1506,7 @@ mod tests {
             &event_tx,
             runs_dir.path(),
             &cancel,
+            &MockGitOps::new(),
         )
         .await
         .unwrap();
@@ -1511,8 +1516,8 @@ mod tests {
             "expected Success after Conflicts+Merged, got {:?}",
             result.outcome
         );
-        // Rebase failed (no real git) so no force push occurred
-        assert_eq!(*github.force_push_count.lock().unwrap(), 0);
+        // MockGitOps returns RebaseResult::Success, so force push is triggered
+        assert_eq!(*github.force_push_count.lock().unwrap(), 1);
     }
 
     // -----------------------------------------------------------------------

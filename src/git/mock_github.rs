@@ -167,3 +167,33 @@ impl GitHub for MockGitHub {
         Ok(())
     }
 }
+
+use super::worktree::{GitOps, RebaseResult};
+
+/// Mock git operations for integration testing.
+pub struct MockGitOps {
+    pub rebase_responses: Mutex<VecDeque<RebaseResult>>,
+    pub remove_count: Mutex<u32>,
+}
+
+impl MockGitOps {
+    pub fn new() -> Self {
+        Self {
+            rebase_responses: Mutex::new(VecDeque::new()),
+            remove_count: Mutex::new(0),
+        }
+    }
+}
+
+impl GitOps for MockGitOps {
+    fn rebase(&self, _worktree_path: &Path, _default_branch: &str) -> crate::error::Result<RebaseResult> {
+        Ok(self.rebase_responses.lock().unwrap()
+            .pop_front()
+            .unwrap_or(RebaseResult::Success))
+    }
+
+    fn remove(&self, _repo_path: &Path, _issue_id: &str, _worktree_dir: &Path) -> crate::error::Result<()> {
+        *self.remove_count.lock().unwrap() += 1;
+        Ok(())
+    }
+}
