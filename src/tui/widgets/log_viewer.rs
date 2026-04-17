@@ -49,6 +49,25 @@ impl LogBuffer {
 
 }
 
+/// Number of visible rows a line will occupy when rendered with `Wrap { trim: false }`.
+/// `width` is the interior width (area width minus left/right borders).
+#[allow(dead_code)] // integrated in Task 3
+pub(crate) fn rendered_rows(line: &str, width: u16) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let w = width as usize;
+    // Ratatui wraps by display width. For ASCII-heavy agent output this is close
+    // enough to char count; if multi-byte content becomes common, swap to
+    // unicode-width. Each explicit '\n' is its own row.
+    line.split('\n')
+        .map(|seg| {
+            let chars = seg.chars().count().max(1);
+            chars.div_ceil(w)
+        })
+        .sum()
+}
+
 pub fn render_log(
     frame: &mut Frame,
     area: Rect,
@@ -140,5 +159,30 @@ mod tests {
         let buf = LogBuffer::new(100);
         assert!(buf.is_empty());
         assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn test_rendered_rows_short_line() {
+        assert_eq!(rendered_rows("hello", 80), 1);
+    }
+
+    #[test]
+    fn test_rendered_rows_wraps() {
+        assert_eq!(rendered_rows(&"x".repeat(161), 80), 3);
+    }
+
+    #[test]
+    fn test_rendered_rows_empty() {
+        assert_eq!(rendered_rows("", 80), 1);
+    }
+
+    #[test]
+    fn test_rendered_rows_zero_width_defensive() {
+        assert_eq!(rendered_rows("hello", 0), 1);
+    }
+
+    #[test]
+    fn test_rendered_rows_embedded_newline() {
+        assert_eq!(rendered_rows("a\nb", 80), 2);
     }
 }
