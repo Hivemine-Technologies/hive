@@ -129,12 +129,16 @@ impl GitHub for GitHubClient {
             return Ok(PrStatus::Closed);
         }
 
-        // Open — check mergeability
-        // GitHub computes mergeable async; None means "not yet computed"
-        // Only trigger rebase when GitHub definitively says false (real conflicts)
-        match pr.mergeable {
-            Some(false) => Ok(PrStatus::Conflicts),
-            _ => Ok(PrStatus::Clean), // Some(true) or None — no action needed
+        // Use mergeable_state (not mergeable) — the bool collapses "dirty,"
+        // "draft," "blocked," and "behind" into a single false, which caused
+        // PrWatch to loop-rebase draft PRs forever. The enum is the truth.
+        use octocrab::models::pulls::MergeableState;
+        match pr.mergeable_state {
+            Some(MergeableState::Dirty) => Ok(PrStatus::Conflicts),
+            Some(MergeableState::Behind) => Ok(PrStatus::NeedsRebase),
+            // Clean, Draft, Blocked, HasHooks, Unknown, Unstable, None —
+            // none indicate conflicts or need-to-rebase.
+            _ => Ok(PrStatus::Clean),
         }
     }
 
@@ -464,9 +468,14 @@ pub enum PrStatus {
     Merged,
     /// PR was closed without merging.
     Closed,
-    /// PR is open and clean (no conflicts), or mergeability not yet computed.
+    /// PR is open and mergeable (or in a state that needs no action —
+    /// draft, blocked on checks, mergeability not yet computed).
     Clean,
-    /// PR is open but has merge conflicts (GitHub's mergeable == false).
+    /// PR is open but behind base branch (mergeable_state == "behind").
+    /// A plain rebase is expected to succeed without conflicts.
+    NeedsRebase,
+    /// PR has real merge conflicts (mergeable_state == "dirty") that may
+    /// require an agent to resolve.
     Conflicts,
 }
 

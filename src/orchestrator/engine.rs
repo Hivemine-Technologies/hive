@@ -687,6 +687,68 @@ async fn run_pr_watch(
                     session_id: None,
                 });
             }
+            PrStatus::NeedsRebase => {
+                if rebase_attempts >= max_rebase_attempts {
+                    return Ok(PhaseExecutionResult {
+                        outcome: PhaseOutcome::NeedsAttention {
+                            reason: format!(
+                                "Rebase attempts exhausted ({rebase_attempts}/{max_rebase_attempts})"
+                            ),
+                        },
+                        cost_usd: total_cost,
+                        session_id: None,
+                    });
+                }
+                rebase_attempts += 1;
+
+                send_and_log(
+                    event_tx, runs_dir, issue_id,
+                    AgentEvent::TextDelta(format!(
+                        "[PR Watch] Branch behind base. \
+                         Rebase attempt {rebase_attempts}/{max_rebase_attempts}...\n"
+                    )),
+                )
+                .await;
+
+                match git_ops.rebase(working_dir, default_branch)? {
+                    crate::git::worktree::RebaseResult::Success => {
+                        github.force_push_current_branch(working_dir).await?;
+                        rebase_attempts = 0;
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Rebase + force-push complete. Resuming watch...\n"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                    }
+                    crate::git::worktree::RebaseResult::Conflicts => {
+                        // GitHub said "behind" (clean rebase expected) but
+                        // local rebase hit conflicts — likely a race with a
+                        // concurrent push. Let GitHub recompute mergeable_state
+                        // and handle it as Conflicts on the next poll.
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Unexpected conflicts during rebase. \
+                                 Will retry on next poll...\n".to_string(),
+                            ),
+                        )
+                        .await;
+                    }
+                    crate::git::worktree::RebaseResult::Failed => {
+                        send_and_log(
+                            event_tx, runs_dir, issue_id,
+                            AgentEvent::TextDelta(
+                                "[PR Watch] Git fetch failed (network issue?). Will retry on next poll...\n"
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            }
             PrStatus::Conflicts => {
                 if rebase_attempts >= max_rebase_attempts {
                     return Ok(PhaseExecutionResult {
@@ -1971,6 +2033,59 @@ mod tests {
         assert_eq!(*github.force_push_count.lock().unwrap(), 1);
         // Cost should include the agent session
         assert!(result.cost_usd > 0.0, "expected agent cost tracked");
+    }
+
+    #[tokio::test]
+    async fn test_pr_watch_needs_rebase_does_clean_rebase_and_push() {
+        // PrStatus::NeedsRebase → clean rebase + force-push, no agent involved
+        let github = MockGitHub::new();
+        {
+            let mut q = github.pr_status_responses.lock().unwrap();
+            q.push_back(PrStatus::NeedsRebase);
+            q.push_back(PrStatus::Merged);
+        }
+
+        let git_ops = MockGitOps::new();
+        git_ops
+            .rebase_responses
+            .lock()
+            .unwrap()
+            .push_back(RebaseResult::Success);
+
+        let runner = MockRunner::new();
+        let event_tx = make_channel();
+        let cancel = CancellationToken::new();
+        let runs_dir = tempfile::tempdir().unwrap();
+        let working_dir = tempfile::tempdir().unwrap();
+        let cfg = short_poll_config();
+
+        let result = run_pr_watch(
+            &github,
+            &runner,
+            1,
+            "TEST-REBASE",
+            "Test Issue",
+            working_dir.path(),
+            "main",
+            Some(&cfg),
+            &event_tx,
+            runs_dir.path(),
+            &cancel,
+            &git_ops,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result.outcome, PhaseOutcome::Success),
+            "expected Success, got {:?}",
+            result.outcome
+        );
+        assert_eq!(*github.force_push_count.lock().unwrap(), 1);
+        assert_eq!(
+            result.cost_usd, 0.0,
+            "NeedsRebase must not spawn an agent — clean rebase should handle it"
+        );
     }
 
     #[tokio::test]
