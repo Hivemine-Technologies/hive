@@ -77,6 +77,7 @@ fn phase_short_label(phase: &Phase) -> &'static str {
         Phase::BotReviews { .. } => "BotRev",
         Phase::FollowUps => "FollowUp",
         Phase::Handoff => "Handoff",
+        Phase::PrWatch => "PRWatch",
         _ => "?",
     }
 }
